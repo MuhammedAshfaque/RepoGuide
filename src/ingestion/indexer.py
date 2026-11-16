@@ -47,14 +47,17 @@ def get_embedding_model():
     """
     Load the sentence-transformers embedding model (lazy singleton).
 
-    Returns the model object. The first call downloads/loads the model
-    (~90 MB); subsequent calls return the cached instance.
+    Returns the model object. Tries local cache first to prevent slow network
+    checks, falling back to download on first run.
     """
     global _embedding_model
     if _embedding_model is None:
         from sentence_transformers import SentenceTransformer
         print(f"[indexer] Loading embedding model: {EMBEDDING_MODEL} ...")
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        try:
+            _embedding_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
+        except Exception:
+            _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
         print(f"[indexer] Embedding model loaded.")
     return _embedding_model
 
