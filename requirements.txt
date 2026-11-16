@@ -1,0 +1,26 @@
+# CodeCompass dependencies
+# Install: pip install -r requirements.txt
+
+# --- Phase 1: Setup & Ingestion ---
+python-dotenv>=1.0.0
+gitpython>=3.1.0
+
+# --- Phase 2: Chunking ---
+# (ast is built-in, no extra dependency)
+
+# --- Phase 3: Indexing & Vector Search ---
+# sentence-transformers>=2.2.0
+# chromadb>=0.4.0
+
+# --- Phase 4: Keyword Search ---
+# rank_bm25>=0.2.2
+
+# --- Phase 5: Generation ---
+# ollama>=0.1.0
+
+# --- Phase 6: UI ---
+# streamlit>=1.28.0
+
+# --- Testing ---
+pytest>=7.0.0
+
