@@ -76,3 +76,20 @@ SKIP_FILES: set[str] = {
     ".DS_Store", "Thumbs.db",
 }
 
+
+def get_collection_name(repo_name: str) -> str:
+    """
+    Build a valid collection / index identifier from a repo name.
+
+    ChromaDB collection names must:
+      - Be 3-63 characters
+      - Start and end with alphanumeric
+      - Contain only alphanumeric, underscores, or hyphens
+    """
+    clean = "".join(c if c.isalnum() or c in "-_" else "-" for c in repo_name)
+    clean = clean.strip("-_")
+    if len(clean) < 3:
+        clean = clean + "-idx"
+    return clean[:63]
+
+

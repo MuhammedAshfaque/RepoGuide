@@ -27,9 +27,11 @@ from src.config import (
     DATA_DIR,
     EMBEDDING_MODEL,
     EMBEDDING_BATCH_SIZE,
+    get_collection_name,
 )
 from src.ingestion.loader import load_files
 from src.ingestion.chunker import chunk_file, Chunk
+from src.retrieval.keyword_search import build_bm25_index, get_bm25_index_path
 
 
 # ── ChromaDB + Embedding Globals ─────────────────────────────────────────────
@@ -73,23 +75,7 @@ def get_chroma_client():
     return _chroma_client
 
 
-def _collection_name(repo_name: str) -> str:
-    """
-    Build a valid ChromaDB collection name from a repo name.
-
-    ChromaDB collection names must:
-      - Be 3-63 characters
-      - Start and end with alphanumeric
-      - Contain only alphanumeric, underscores, or hyphens
-    """
-    # Replace dots and other special chars with hyphens
-    clean = "".join(c if c.isalnum() or c in "-_" else "-" for c in repo_name)
-    clean = clean.strip("-_")
-    # Ensure minimum length
-    if len(clean) < 3:
-        clean = clean + "-idx"
-    # Truncate to max length
-    return clean[:63]
+_collection_name = get_collection_name
 
 
 def _chunk_id(chunk: Chunk, index: int) -> str:
@@ -138,13 +124,14 @@ def index_repo(
 
     # ── Step 2: Check if already indexed ──────────────────────────────
     client = get_chroma_client()
+    bm25_path = get_bm25_index_path(repo_name)
 
-    if not force_reindex:
+    if not force_reindex and bm25_path.exists():
         try:
             existing = client.get_collection(col_name)
             count = existing.count()
             if count > 0:
-                print(f"[indexer] Collection '{col_name}' already has {count} chunks. "
+                print(f"[indexer] Collection '{col_name}' and BM25 index already exist ({count} chunks). "
                       f"Skipping. Use force_reindex=True to re-index.")
                 return {
                     "repo_name": repo_name,
@@ -243,6 +230,10 @@ def index_repo(
 
         print(f"  Batch {batch_num}/{total_batches} done "
               f"({len(batch)} chunks)")
+
+    # ── Step 5: Build and save BM25 keyword index ─────────────────────
+    print(f"[indexer] Building and saving BM25 keyword index ...")
+    build_bm25_index(all_chunks, repo_name)
 
     duration = round(time.time() - start_time, 2)
     print(f"[indexer] ✅ Indexing complete! {len(all_chunks)} chunks "
