@@ -4,45 +4,48 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests: 138 passed](https://img.shields.io/badge/tests-138%20passed-brightgreen.svg)](tests/)
+[![Tests: 128 passed](https://img.shields.io/badge/tests-128%20passed-brightgreen.svg)](tests/)
 [![Retrieval Hit@5: 96.9%](https://img.shields.io/badge/Hit%405-96.9%25-success.svg)](evaluation/results.md)
 
-Onboarding to a new, unfamiliar codebase is often a frustrating experience. Developers spend hours tracing sprawling function calls, locating config files, and understanding how data flows between architectural layers. Generic AI code chats frequently hallucinate non-existent files or invent methods that do not exist. **CodeCompass** addresses this using an end-to-end Retrieval-Augmented Generation (RAG) system tailored specifically for source code. It parses code into semantic Abstract Syntax Tree (AST) units, indexes them with dense vectors and BM25 keyword matching, fuses candidate rankings using Reciprocal Rank Fusion (RRF), and generates grounded answers citing exact file paths and line ranges (`path/file.py:start-end`) using a local LLM or cloud API.
+Onboarding to an unfamiliar codebase takes time: developers trace function calls, hunt for configuration files, and map request flows across modules. Generic AI code chats often invent file paths or line numbers. **CodeCompass** is a local-first Retrieval-Augmented Generation (RAG) assistant built with **LangChain** and tailored for source code. It parses Python code via AST into LangChain `Document` chunks, indexes them in persistent Chroma and BM25, fuses candidates with `EnsembleRetriever` (Reciprocal Rank Fusion) and an optional `CrossEncoderReranker`, streams grounded answers through an LCEL chain (`ChatOllama` or `ChatGoogleGenerativeAI`), and verifies every cited `file.py:start-end` reference against the retrieved chunks.
+
+*(The earlier manual pre-LangChain implementation is preserved on the git tag `manual-v1`, with its benchmark saved in [`evaluation/results_manual_baseline.md`](evaluation/results_manual_baseline.md).)*
 
 ---
 
 ## 🏛️ Architecture Overview
 
-CodeCompass operates in two distinct phases: **Ingestion & Indexing** and **Retrieval & Grounded Generation**.
+CodeCompass runs in two phases: **Ingestion & Indexing** and **LangChain Retrieval & LCEL Generation**.
 
 ```mermaid
 flowchart TD
     subgraph Ingestion ["1. Ingestion & Indexing Pipeline"]
-        A["GitHub Repo URL / Local Path"] --> B["Loader & File Filter\n(skips .git, node_modules, binaries, >100KB)"]
-        B --> C["Fingerprint Check\n(Git SHA / content MD5 cache)"]
-        C -->|Unchanged| CACHE["Skip Indexing\n(Load cached DB)"]
-        C -->|New / Changed| D["Code-Aware Chunker\n(AST for Python, 50-line fallback)"]
-        D --> E["Embedding Pipeline\n(all-MiniLM-L6-v2 in batches of 32)"]
-        D --> F["BM25 Indexer\n(snake_case & camelCase tokenization)"]
-        E --> G[("ChromaDB Vector Store\n(Persistent on disk)")]
-        F --> H[("BM25 Pickle Index\n(Serialized on disk)")]
+        A["GitHub Repo URL / Local Path"] --> B["Custom Loader & File Filter\n(skips .git, node_modules, binaries, >100KB)"]
+        B --> C["Custom Fingerprint Check\n(Git SHA / content MD5 cache)"]
+        C -->|Unchanged| CACHE["Skip Re-Indexing\n(Load cached Chroma + docs.pkl)"]
+        C -->|New / Changed| D["Custom AST Chunker\n(Python AST + 50-line fallback -> LangChain Documents)"]
+        D --> HDR["Metadata Header Enrichment\n(# type parent.symbol | File: path)"]
+        HDR --> E["HuggingFaceEmbeddings\n(all-MiniLM-L6-v2, batches of 32)"]
+        E --> G[("LangChain Chroma\n(Persistent in data/chroma_db)")]
+        HDR --> H[("Serialized Documents\n(data/<repo>_docs.pkl)")]
     end
 
-    subgraph Query ["2. Retrieval & Generation Pipeline"]
-        Q["User Question\n('Where is user login handled?')"] --> VEC["Dense Vector Search\n(Cosine similarity, Top 20)"]
-        Q --> BM["BM25 Keyword Search\n(Code tokenization, Top 20)"]
+    subgraph Query ["2. LangChain Retrieval & LCEL Generation"]
+        Q["User Question\n('Where is user login handled?')"] --> VEC["Chroma Vector Retriever\n(Top 20)"]
+        Q --> BM["BM25Retriever\n(Custom snake_case/camelCase tokenizer, score > 0, Top 20)"]
         G -.-> VEC
         H -.-> BM
-        VEC --> RRF["Reciprocal Rank Fusion (RRF)\nk = 60"]
+        VEC --> RRF["EnsembleRetriever (RRF)\nweights=[0.5, 0.5], c=60"]
         BM --> RRF
-        RRF --> RERANK{"Cross-Encoder Reranker\n(ms-marco-MiniLM-L-6-v2)"}
-        RERANK -->|Enabled| TOP["Top 4 Code Chunks\n(Rerank score)"]
+        RRF --> RERANK{"ContextualCompressionRetriever +\nCrossEncoderReranker (optional)"}
+        RERANK -->|Enabled| TOP["Top 4 Documents\n(ms-marco-MiniLM-L-6-v2)"]
         RERANK -->|Disabled / Default| TOP
-        TOP --> PROMPT["Grounding Prompt Builder\n(Few-shot citation examples)"]
-        PROMPT --> LLM["LLM Generation\n(Ollama: qwen2.5-coder:3b / Gemini)"]
-        LLM --> STREAM["Real-time Token Stream"]
-        STREAM --> AUDIT["Citation Post-Verification\n(Regex file & line audit)"]
-        AUDIT --> UI["Streamlit UI\n(Answer + Badges + Syntax Viewer)"]
+        TOP --> FMT["format_docs()\n(strip header, cap 4 chunks / 2500 chars)"]
+        FMT --> PROMPT["ChatPromptTemplate\n(Strict citation rules + few-shot examples)"]
+        PROMPT --> LLM["ChatOllama (qwen2.5-coder:3b)\nor ChatGoogleGenerativeAI (Gemini)"]
+        LLM --> PARSE["StrOutputParser\n(Real-time token stream)"]
+        PARSE --> AUDIT["Custom Citation Verification\n(Regex file & line range check)"]
+        AUDIT --> UI["Streamlit UI\n(Answer + Badges + Code Viewer)"]
     end
 ```
 
@@ -50,68 +53,81 @@ flowchart TD
 
 ## 📊 Evaluation & Empirical Benchmark
 
-We benchmarked CodeCompass against a ground-truth dataset of **32 developer questions** across 7 core functional areas (Architecture, Authentication, Models, Profiles, Articles, Errors, and Configuration) on the [`gothinkster/flask-realworld-example-app`](https://github.com/gothinkster/flask-realworld-example-app) codebase.
+We benchmarked retrieval on **32 ground-truth developer questions** across 7 categories (Architecture, Authentication, Models, Profiles, Articles, Errors, and Configuration) on [`gothinkster/flask-realworld-example-app`](https://github.com/gothinkster/flask-realworld-example-app). Every mode runs a warm-up query before timing so latency reflects steady-state retrieval rather than cold model loading.
 
-The numbers below are copied directly from the auto-generated evaluation report in [`evaluation/results.md`](evaluation/results.md):
+### Current LangChain Results ([`evaluation/results.md`](evaluation/results.md))
 
 | Metric | Vector Only | BM25 Only | Hybrid (RRF) | Hybrid + Rerank |
 |---|:---:|:---:|:---:|:---:|
-| **Hit@1** | 62.5% | 40.6% | **43.8%** | **71.9%** |
-| **Hit@3** | 87.5% | 62.5% | **87.5%** | **90.6%** |
-| **Hit@5** | 90.6% | 68.8% | **96.9%** | **96.9%** |
-| **MRR (Mean Reciprocal Rank)** | 0.7474 | 0.5104 | **0.6557** | **0.8177** |
-| **Average Latency (ms)** | 37.3 ms | 1.5 ms | 39.1 ms | 2587.5 ms |
+| **Hit@1** | 65.6% | 40.6% | 46.9% | **78.1%** |
+| **Hit@3** | 87.5% | 62.5% | 78.1% | **90.6%** |
+| **Hit@5** | 90.6% | 68.8% | 93.8% | **96.9%** |
+| **MRR (Mean Reciprocal Rank)** | 0.7526 | 0.5052 | 0.6505 | **0.8510** |
+| **Average Latency (ms)** | 24.8 ms | 1.2 ms | 25.5 ms | 2135.8 ms |
 
-### Category Breakdown
+### Category Breakdown (LangChain)
 
 | Category | Metric | Vector Only | BM25 Only | Hybrid (RRF) | Hybrid + Rerank |
 |---|---|:---:|:---:|:---:|:---:|
-| **Conceptual / Natural Language** *(22 queries)* | **Hit@5** | 86.4% | 54.5% | **95.5%** | 95.5% |
-| | **MRR** | 0.7008 | 0.3333 | **0.5674** | **0.8333** |
-| **Exact Symbol / Identifier** *(10 queries)* | **Hit@5** | 100.0% | 100.0% | **100.0%** | 100.0% |
-| | **MRR** | 0.8500 | **0.9000** | 0.8500 | 0.7833 |
+| **Conceptual / Natural Language** *(22 queries)* | **Hit@5** | 86.4% | 54.5% | 90.9% | **95.5%** |
+| | **MRR** | 0.7462 | 0.3333 | 0.5371 | **0.8364** |
+| **Exact Symbol / Identifier** *(10 queries)* | **Hit@5** | **100.0%** | **100.0%** | **100.0%** | **100.0%** |
+| | **MRR** | 0.7667 | 0.8833 | **0.9000** | 0.8833 |
+
+### Comparison Against Manual v1 Baseline ([`evaluation/results_manual_baseline.md`](evaluation/results_manual_baseline.md))
+
+| Mode | Version | Hit@1 | Hit@3 | Hit@5 | MRR | Avg Latency |
+|---|---|:---:|:---:|:---:|:---:|:---:|
+| **Vector Only** | Manual v1 | 62.5% | 87.5% | 90.6% | 0.7474 | 37.3 ms |
+| **Vector Only** | LangChain | **65.6%** | **87.5%** | **90.6%** | **0.7526** | **24.8 ms** |
+| **BM25 Only** | Manual v1 | 40.6% | 62.5% | 68.8% | 0.5104 | 1.5 ms |
+| **BM25 Only** | LangChain | 40.6% | 62.5% | 68.8% | 0.5052 | **1.2 ms** |
+| **Hybrid (RRF)** | Manual v1 | 43.8% | 87.5% | 96.9% | 0.6557 | 39.1 ms |
+| **Hybrid (RRF)** | LangChain | **46.9%** | 78.1% | 93.8% | 0.6505 | **25.5 ms** |
+| **Hybrid + Rerank** | Manual v1 | 71.9% | 90.6% | 96.9% | 0.8177 | 2587.5 ms |
+| **Hybrid + Rerank** | LangChain | **78.1%** | **90.6%** | **96.9%** | **0.8510** | **2135.8 ms** |
 
 ### Analysis & Observations
 
-1. **Hybrid vs. Vector Only:**
-   - **Hit@5:** Hybrid retrieval achieved a higher Hit@5 (**96.9%**) than Vector Only (90.6%) and BM25 Only (68.8%). Combining dense and sparse retrieval helped surface target files that vector search missed (such as configuration classes).
-   - **Hit@1 and MRR:** However, Vector Only had a higher Hit@1 (62.5% vs. 43.8%) and higher MRR (0.7474 vs. 0.6557) than Hybrid. Reciprocal Rank Fusion frequently placed the correct chunk within the top 3 to 5 results, but vector search placed it directly at Rank 1 more often when it matched.
+1. **Hybrid (RRF) vs. Vector Only and BM25 Only:**
+   - **Hit@5:** Hybrid (RRF) reached **93.8%**, which is higher than Vector Only (90.6%) and BM25 Only (68.8%).
+   - **Hit@1 and MRR:** Vector Only had a higher Hit@1 (65.6% vs. 46.9%) and higher MRR (0.7526 vs. 0.6505) than Hybrid (RRF). RRF surfaced more targets inside the top 5, while Vector Only ranked its matches at Rank 1 more often.
 2. **Reranker Trade-offs:**
-   - **Ranking Precision:** Hybrid + Rerank achieved the highest MRR (**0.8177**) and the highest Hit@1 (**71.9%**), successfully placing target snippets at Rank 1 in most queries.
-   - **Latency:** It also had by far the highest latency (**2587.5 ms** vs. 39.1 ms for Hybrid and 37.3 ms for Vector).
-3. **Scope and Limits:**
-   - These findings are based on a small evaluation set of 32 questions on a single repository (`flask-realworld-example-app`). Results on larger codebases or other programming languages may differ.
+   - **Ranking Precision & Recall:** Hybrid + Rerank achieved the highest Hit@1 (**78.1%**), highest Hit@5 (**96.9%**), and highest MRR (**0.8510**).
+   - **Latency:** Hybrid + Rerank also had by far the highest latency (**2135.8 ms** vs. 25.5 ms for Hybrid, 24.8 ms for Vector, and 1.2 ms for BM25).
+3. **LangChain vs. Manual v1:**
+   - Prepending the metadata header (`# <type> <parent>.<symbol> | File: <path>`) to `Document.page_content` gave Chroma, BM25, and the cross-encoder the same structural signal as Manual v1 while cutting **825 lines of source code** (-27.0%). Vector Only and Hybrid + Rerank improved over Manual v1, while Hybrid (RRF) differed by 1 question on Hit@5 (30/32 vs. 31/32) because all retrievers share one unified `page_content` format rather than separate per-retriever text templates.
+4. **Scope and Limits:**
+   - These findings are based on 32 questions on a single repository (`flask-realworld-example-app`). Results on larger repositories or other programming languages may differ.
 
 ---
 
 ## 💡 Key Design Decisions & Interview Talking Points
 
-| Decision | Implementation | Why We Chose It (Interview Rationale) |
+| Decision | Implementation | Why We Chose It |
 |---|---|---|
-| **AST Chunking** | Python `ast` module | Fixed-size token windows break code at arbitrary lines, severing function signatures from their bodies. AST chunking guarantees every chunk represents a coherent semantic unit (function, method, class) with exact line boundaries. |
-| **Code Tokenization** | Regex subword split | Standard NLP tokenizers treat `get_user_by_id` as an opaque token. Our tokenizer preserves the compound token while indexing constituent parts (`get`, `user`, `id`), allowing BM25 to match both exact symbols and partial subwords. |
-| **Rank Fusion (RRF)** | $1 / (60 + \text{rank})$ | Dense vector cosine scores ($[0, 1]$) and BM25 scores ($[0, \infty)$) live on incompatible mathematical scales. RRF operates solely on rank position, avoiding fragile score normalization or hyperparameter tuning. |
-| **Memory Consciousness** | 8 GB RAM target | Embeddings are calculated in batches of 32 chunks; embedding and cross-encoder models are singletons lazy-loaded on demand; ChromaDB runs in-process on disk. Peak memory usage remains under 1.5 GB. |
-| **Post-Citation Verification** | Regex audit engine | Small local models (3B) occasionally generate plausible-sounding hallucinated line numbers. CodeCompass intercepts generated text, regex-extracts citations, and checks them against retrieved AST metadata, displaying verified badges in the UI. |
-| **Provider Agnostic LLM** | `LLMProvider` ABC | All generation logic is decoupled behind an abstract base class. CodeCompass defaults to local Ollama (`qwen2.5-coder:3b`), but supports Google Gemini API with a single `.env` setting for zero-cost cloud hosting. |
+| **LangChain for standard RAG plumbing** | `Chroma`, `BM25Retriever`, `EnsembleRetriever`, `CrossEncoderReranker`, LCEL (`ChatPromptTemplate \| llm \| StrOutputParser`) | Replaces ~825 lines of boilerplate vector DB, RRF fusion, and HTTP/LLM client wrappers with readable, standard components while keeping the same features. |
+| **Custom AST chunker & file loader** | Python `ast` module outputting `Chunk(Document)` | LangChain text splitters do not preserve exact Python function/method/class boundaries, decorators, parent classes, and line numbers as cleanly as an AST walk. |
+| **Metadata header in `page_content`** | `add_metadata_header()` + `strip_metadata_header()` | Embedding and scoring raw method bodies loses file path and enclosing class context. Prepending a single comment header during indexing lifted Vector Hit@5 from 84.4% to 90.6% and Rerank MRR from 0.7589 to 0.8510, while stripping it in the UI/prompt keeps displayed code clean. |
+| **Identifier-aware BM25 tokenization** | `tokenize_code` passed as `preprocess_func` + zero-score filter | Splits `snake_case` and `camelCase` identifiers while preserving the full symbol, so queries match both `jwt_optional` and `jwt`. Dropping `score <= 0` prevents arbitrary documents from matching out-of-vocabulary queries. |
+| **Repo fingerprint caching** | Git SHA or content MD5 in `data/<repo>_meta.json` | Unchanged repositories skip re-embedding and re-indexing immediately. |
+| **Custom citation post-verification** | Regex audit in `src/generation/chain.py` | Small 3B models can still hallucinate file paths or line ranges. Regex-checking every cited `file.py:start-end` against retrieved `Document.metadata` catches unverified citations in the UI. |
+| **8 GB RAM Windows budget** | Batch size 32, lazy-loaded singletons, max 4 chunks (2,500 chars each), `num_ctx=4096` | Keeps local embeddings, cross-encoder (~80 MB, optional), and `qwen2.5-coder:3b` within 8 GB RAM without crashes. |
 
 ---
 
 ## ⚠️ Known Limitations & Future Work
 
-While CodeCompass performs well on the demo repository, real-world codebases present additional challenges:
-
 1. **Non-Python File Chunking:**
-   - While Python files use full AST parsing, non-Python files (`.js`, `.ts`, `.go`, `.md`) fall back to fixed 50-line overlapping windows.
-   - *Future Work:* Integrate Tree-sitter for multi-language AST chunking across TypeScript, Go, Rust, and Java.
-2. **Local 3B Parameter Model Capacity:**
-   - `qwen2.5-coder:3b` is lightweight and runs fast on consumer RAM, but its multi-step reasoning is weaker than larger 14B/32B models or frontier cloud LLMs. It relies heavily on strict few-shot examples in the prompt to adhere to citation formats.
-   - *Alternative:* Switch to `LLM_PROVIDER=gemini` in `.env` to leverage larger frontier models with no local hardware overhead.
-3. **Single Repository Evaluation Scope:**
-   - The quantitative benchmark was evaluated against 32 questions on a single target repository (`flask-realworld-example-app`). Performance on massive repositories (>100,000 files) would require distributed vector storage and hierarchical indexing.
-4. **Static vs Call-Graph Retrieval:**
-   - Retrieval is currently lexical and semantic. It does not trace AST import graphs or call graphs (e.g., following caller-callee chains across files).
-   - *Future Work:* Construct an in-memory symbol call graph to retrieve caller/callee contexts alongside search chunks.
+   - Python files use AST parsing, while non-Python files (`.js`, `.ts`, `.go`, `.md`, etc.) use a 50-line overlapping fallback chunker.
+   - *Future Work:* Tree-sitter multi-language AST chunking.
+2. **Local 3B Model Quality:**
+   - `qwen2.5-coder:3b` runs locally on 8 GB RAM, but gives weaker answers and reasoning than larger models. It depends on strict few-shot prompt examples to maintain citation formatting.
+   - *Alternative:* Set `LLM_PROVIDER=gemini` and `GEMINI_API_KEY` in `.env` to use Google Gemini via `ChatGoogleGenerativeAI`.
+3. **Single-Repository Evaluation Scope:**
+   - The benchmark covers 32 questions on one demo repository (`flask-realworld-example-app`). Larger repositories or different languages may show different retrieval numbers.
+4. **No Call-Graph Retrieval:**
+   - Retrieval uses semantic and lexical similarity rather than static import/call graphs across files.
 
 ---
 
@@ -123,146 +139,93 @@ While CodeCompass performs well on the demo repository, real-world codebases pre
 - **Git**
 - **Ollama** installed on Windows ([Download Ollama](https://ollama.com/download/windows))
 
-### 1. Set Up Ollama & Pull the Model
-
-Open PowerShell and start Ollama, then pull the code model:
+### 1. Pull the Local Model in Ollama
 
 ```powershell
 ollama pull qwen2.5-coder:3b
-```
-
-Verify that Ollama is running:
-```powershell
 ollama list
 ```
 
----
-
-### 2. Clone Repository & Setup Virtual Environment
+### 2. Clone & Install Dependencies
 
 ```powershell
-# Clone this repository
 git clone https://github.com/your-username/codecompass.git
 cd codecompass
 
-# Create virtual environment
 python -m venv venv
-
-# Activate virtual environment
 .\venv\Scripts\activate
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
----
-
 ### 3. Configure Environment Variables
-
-Copy the example configuration file:
 
 ```powershell
 copy .env.example .env
 ```
 
-Review `.env`. By default, it is configured for local Ollama:
-```ini
-LLM_PROVIDER=ollama
-LLM_MODEL=qwen2.5-coder:3b
-OLLAMA_BASE_URL=http://localhost:11434
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
-```
+Default `.env` uses local Ollama (`LLM_PROVIDER=ollama`, `LLM_MODEL=qwen2.5-coder:3b`). To switch to Gemini, set `LLM_PROVIDER=gemini` and add `GEMINI_API_KEY` in `.env` (never hardcode API keys).
 
-*(Optional: To use Google Gemini instead of Ollama, set `LLM_PROVIDER=gemini` and add your free `GEMINI_API_KEY` from Google AI Studio).*
-
----
-
-### 4. Run the Test Suite
-
-Execute the full pytest suite (138 unit & integration tests):
+### 4. Run Tests
 
 ```powershell
-pytest tests/ -v
+.\venv\Scripts\python -m pytest -v
 ```
 
-All 138 tests should pass in under 6 seconds:
-```text
-============================= 138 passed in 5.82s =============================
-```
-
----
+All **128 tests** pass in under 10 seconds.
 
 ### 5. Run the Retrieval Benchmark
 
-To reproduce the benchmark evaluation numbers:
-
 ```powershell
-python -m evaluation.run_eval --repo flask-realworld-example-app
+.\venv\Scripts\python -m evaluation.run_eval --repo flask-realworld-example-app
 ```
 
-The script evaluates all 32 questions and generates an updated `evaluation/results.md`.
+### 6. Launch the Streamlit App
+
+```powershell
+.\venv\Scripts\streamlit run app.py
+```
+
+Open `http://localhost:8501`, click **⚡ Index Repo**, pick a search mode (`Hybrid`, `Hybrid + Rerank`, `Vector Only`, `BM25 Only`), and ask questions about the codebase.
 
 ---
 
-### 6. Launch the Streamlit Web Application
-
-Start the web UI:
-
-```powershell
-streamlit run app.py
-```
-
-The application will launch in your browser at `http://localhost:8501`.
-
-1. Paste a GitHub URL (or keep the default `data/flask-realworld-example-app`).
-2. Click **⚡ Index Repo** (cached automatically if unchanged).
-3. Select your retrieval mode (Hybrid RRF, Hybrid + Rerank, Vector Only, BM25 Only).
-4. Ask any question and inspect the streamed answer, verified citation badges, and syntax-highlighted code snippets!
-
----
-
-## 🧪 Project Structure
+## 📁 Project Structure
 
 ```text
 codecompass/
-├── .env.example                  # Template showing all config keys
-├── .gitignore                    # Ignores venv/, data/, .env, etc.
-├── requirements.txt              # Python dependencies
-├── PROGRESS.md                   # Complete phase progress & development tracker
-├── DEMO_PLAN.md                  # 3-minute interview demo script & presentation guide
-├── README.md                     # Documentation & evaluation report
-├── app.py                        # Streamlit web UI (streaming chat, snippets, mode toggle)
+├── .env.example                     # Config template (Ollama default + optional Gemini key)
+├── .gitignore                       # Ignores venv/, data/, .env
+├── requirements.txt                 # LangChain + Chroma + BM25 + Streamlit dependencies
+├── PROGRESS.md                      # Development log, migration tracker & LOC summary
+├── DEMO_PLAN.md                     # 3-minute interview walkthrough script
+├── README.md                        # Documentation & evaluation tables
+├── app.py                           # Streamlit UI (indexing, streaming LCEL chat, snippets)
 │
 ├── src/
-│   ├── config.py                 # Central configuration and file filtering constants
+│   ├── config.py                    # Central .env settings and file filtering constants
 │   ├── ingestion/
-│   │   ├── loader.py             # Shallow cloning, directory traversal & file filtering
-│   │   ├── chunker.py            # AST function/class extraction + 50-line fallback
-│   │   └── indexer.py            # Batch embeddings, ChromaDB + BM25 indexing & caching
+│   │   ├── loader.py                # Shallow git clone, directory walk & file filtering
+│   │   ├── chunker.py               # Python AST chunker + 50-line fallback -> LangChain Documents
+│   │   └── indexer.py               # HuggingFaceEmbeddings, LangChain Chroma, docs.pkl & fingerprint cache
 │   ├── retrieval/
-│   │   ├── vector_search.py      # ChromaDB cosine similarity search
-│   │   ├── keyword_search.py     # BM25Okapi with identifier-aware tokenization
-│   │   ├── hybrid.py             # Reciprocal Rank Fusion (RRF, k=60)
-│   │   └── reranker.py           # Cross-Encoder (ms-marco-MiniLM-L-6-v2) reranker
+│   │   └── retrieval.py             # Vector, BM25Retriever (+ tokenizer), EnsembleRetriever, CrossEncoderReranker
 │   └── generation/
-│       ├── llm.py                # Provider-agnostic interface (Ollama + Gemini REST)
-│       ├── prompts.py            # Grounding prompt templates with few-shot citations
-│       └── answerer.py           # End-to-end RAG pipeline + citation regex verifier
+│       └── chain.py                 # ChatOllama/Gemini, ChatPromptTemplate, LCEL chain & citation verifier
 │
 ├── evaluation/
-│   ├── eval_questions.json       # 32 ground-truth benchmark questions across 7 categories
-│   ├── run_eval.py               # Benchmark runner computing Hit@k, MRR & latency
-│   └── results.md                # Quantitative evaluation report
+│   ├── eval_questions.json          # 32 ground-truth questions across 7 categories
+│   ├── run_eval.py                  # Warm-up benchmark runner (Hit@k, MRR, latency)
+│   ├── results.md                   # Current LangChain evaluation report
+│   └── results_manual_baseline.md   # Saved pre-migration manual-v1 baseline report
 │
 └── tests/
-    ├── test_loader.py            # 25 tests for loader, URL parsing, file filters
-    ├── test_chunker.py           # 49 tests for AST chunking, docstrings, decorators
-    ├── test_hybrid.py            # 19 tests for identifier splitting, BM25 & RRF math
-    ├── test_generation.py        # 13 tests for prompts, citation regex & mock LLM
-    ├── test_ui.py                # 5 tests for UI helpers, routing & index checks
-    ├── test_evaluation.py        # 15 tests for ground-truth matching & IR metrics
-    └── test_reranker.py          # 12 tests for reranker, caching & Gemini provider
+    ├── test_loader.py               # 25 tests — URL parsing, directory/file filters
+    ├── test_chunker.py              # 50 tests — AST chunking, fallback chunker, LangChain Document
+    ├── test_retrieval.py            # 17 tests — identifier tokenizer, BM25, Ensemble RRF, Rerank & fallback
+    ├── test_chain.py                # 15 tests — prompt template, header enrichment, LCEL chain, citations
+    ├── test_ui.py                   # 5 tests  — repo name resolution, index check, mode routing
+    └── test_evaluation.py           # 16 tests — ground-truth matching, Hit@k, MRR, report generator
 ```
 
 ---
@@ -270,4 +233,3 @@ codecompass/
 ## 📄 License
 
 MIT License. Free for educational and commercial use.
-
