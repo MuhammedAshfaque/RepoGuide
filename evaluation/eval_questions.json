@@ -1,0 +1,259 @@
+[
+  {
+    "id": 1,
+    "question": "Where is the Flask application factory defined?",
+    "category": "architecture",
+    "expected_file": "conduit/app.py",
+    "expected_symbol": "create_app",
+    "description": "App factory that initializes Flask configuration, extensions, and blueprints"
+  },
+  {
+    "id": 2,
+    "question": "Where are database extensions and plugins initialized in the app?",
+    "category": "architecture",
+    "expected_file": "conduit/app.py",
+    "expected_symbol": "register_extensions",
+    "description": "Registers bcrypt, db, migrate, jwt extensions with Flask app"
+  },
+  {
+    "id": 3,
+    "question": "Where is user registration handled?",
+    "category": "authentication",
+    "expected_file": "conduit/user/views.py",
+    "expected_symbol": "register_user",
+    "description": "API route POST /api/users for user registration"
+  },
+  {
+    "id": 4,
+    "question": "Where is user login handled?",
+    "category": "authentication",
+    "expected_file": "conduit/user/views.py",
+    "expected_symbol": "login_user",
+    "description": "API route POST /api/users/login for authenticating user"
+  },
+  {
+    "id": 5,
+    "question": "Where is the current authenticated user's profile retrieved?",
+    "category": "authentication",
+    "expected_file": "conduit/user/views.py",
+    "expected_symbol": "get_user",
+    "description": "API route GET /api/user returning current user"
+  },
+  {
+    "id": 6,
+    "question": "Where is password hashing and verification implemented for users?",
+    "category": "authentication",
+    "expected_file": "conduit/user/models.py",
+    "expected_symbol": "check_password",
+    "description": "Method verifying bcrypt password hash on User model"
+  },
+  {
+    "id": 7,
+    "question": "Where is set_password defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/user/models.py",
+    "expected_symbol": "set_password",
+    "description": "Hashes password using bcrypt and stores it on user"
+  },
+  {
+    "id": 8,
+    "question": "Where is the JWT identity loader defined?",
+    "category": "authentication",
+    "expected_file": "conduit/utils.py",
+    "expected_symbol": "jwt_identity",
+    "description": "Function loading user identity from JWT payload"
+  },
+  {
+    "id": 9,
+    "question": "Where is identity_loader defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/utils.py",
+    "expected_symbol": "identity_loader",
+    "description": "Returns user.id for JWT token subject"
+  },
+  {
+    "id": 10,
+    "question": "Where is the User database model defined?",
+    "category": "models",
+    "expected_file": "conduit/user/models.py",
+    "expected_symbol": "User",
+    "description": "SQLAlchemy model representing a user"
+  },
+  {
+    "id": 11,
+    "question": "Where is the UserProfile database model defined?",
+    "category": "models",
+    "expected_file": "conduit/profile/models.py",
+    "expected_symbol": "UserProfile",
+    "description": "Model storing user profile information and follow relationships"
+  },
+  {
+    "id": 12,
+    "question": "Where is user follow functionality implemented?",
+    "category": "profiles",
+    "expected_file": "conduit/profile/views.py",
+    "expected_symbol": "follow_user",
+    "description": "API endpoint POST /api/profiles/<username>/follow"
+  },
+  {
+    "id": 13,
+    "question": "Where is user unfollow functionality implemented?",
+    "category": "profiles",
+    "expected_file": "conduit/profile/views.py",
+    "expected_symbol": "unfollow_user",
+    "description": "API endpoint DELETE /api/profiles/<username>/follow"
+  },
+  {
+    "id": 14,
+    "question": "Where is is_following method defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/profile/models.py",
+    "expected_symbol": "is_following",
+    "description": "Checks if a user is following another user profile"
+  },
+  {
+    "id": 15,
+    "question": "Where is the Article database model defined?",
+    "category": "models",
+    "expected_file": "conduit/articles/models.py",
+    "expected_symbol": "Article",
+    "description": "SQLAlchemy model for articles, slugs, tags, and favorites"
+  },
+  {
+    "id": 16,
+    "question": "Where are articles created in the API?",
+    "category": "articles",
+    "expected_file": "conduit/articles/views.py",
+    "expected_symbol": "make_article",
+    "description": "API route POST /api/articles creating an article"
+  },
+  {
+    "id": 17,
+    "question": "Where is article updating implemented?",
+    "category": "articles",
+    "expected_file": "conduit/articles/views.py",
+    "expected_symbol": "update_article",
+    "description": "API route PUT /api/articles/<slug>"
+  },
+  {
+    "id": 18,
+    "question": "Where is article deletion handled?",
+    "category": "articles",
+    "expected_file": "conduit/articles/views.py",
+    "expected_symbol": "delete_article",
+    "description": "API route DELETE /api/articles/<slug>"
+  },
+  {
+    "id": 19,
+    "question": "Where is article favoriting implemented?",
+    "category": "articles",
+    "expected_file": "conduit/articles/views.py",
+    "expected_symbol": "favourite_article",
+    "description": "API route POST /api/articles/<slug>/favorite"
+  },
+  {
+    "id": 20,
+    "question": "Where is unfavourite method defined on Article?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/articles/models.py",
+    "expected_symbol": "unfavourite",
+    "description": "Removes article from user favorites"
+  },
+  {
+    "id": 21,
+    "question": "Where is the Comment model defined?",
+    "category": "models",
+    "expected_file": "conduit/articles/models.py",
+    "expected_symbol": "Comment",
+    "description": "Model representing article comments"
+  },
+  {
+    "id": 22,
+    "question": "Where is the Tags model defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/articles/models.py",
+    "expected_symbol": "Tags",
+    "description": "Model representing article tags"
+  },
+  {
+    "id": 23,
+    "question": "Where is SurrogatePK class defined for database models?",
+    "category": "database",
+    "expected_file": "conduit/database.py",
+    "expected_symbol": "SurrogatePK",
+    "description": "Mixin class providing auto-incrementing primary key ID"
+  },
+  {
+    "id": 24,
+    "question": "Where is reference_col helper defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/database.py",
+    "expected_symbol": "reference_col",
+    "description": "Helper for creating foreign key references in models"
+  },
+  {
+    "id": 25,
+    "question": "Where is CRUDMixin defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/extensions.py",
+    "expected_symbol": "CRUDMixin",
+    "description": "Mixin adding create, update, save, and delete to models"
+  },
+  {
+    "id": 26,
+    "question": "Where is the custom InvalidUsage error exception defined?",
+    "category": "errors",
+    "expected_file": "conduit/exceptions.py",
+    "expected_symbol": "InvalidUsage",
+    "description": "Custom HTTP exception class for JSON error responses"
+  },
+  {
+    "id": 27,
+    "question": "Where is user_not_found error handler defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/exceptions.py",
+    "expected_symbol": "user_not_found",
+    "description": "404 error response when user is not found"
+  },
+  {
+    "id": 28,
+    "question": "Where is ProdConfig defined?",
+    "category": "configuration",
+    "expected_file": "conduit/settings.py",
+    "expected_symbol": "ProdConfig",
+    "description": "Production environment configuration settings"
+  },
+  {
+    "id": 29,
+    "question": "Where is DevConfig defined?",
+    "category": "configuration",
+    "expected_file": "conduit/settings.py",
+    "expected_symbol": "DevConfig",
+    "description": "Development environment configuration settings"
+  },
+  {
+    "id": 30,
+    "question": "Where is TestConfig defined?",
+    "category": "configuration",
+    "expected_file": "conduit/settings.py",
+    "expected_symbol": "TestConfig",
+    "description": "Test environment configuration settings"
+  },
+  {
+    "id": 31,
+    "question": "Where is CLI command test defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/commands.py",
+    "expected_symbol": "test",
+    "description": "Click CLI command for running tests with pytest"
+  },
+  {
+    "id": 32,
+    "question": "Where is CLI command lint defined?",
+    "category": "exact_symbol",
+    "expected_file": "conduit/commands.py",
+    "expected_symbol": "lint",
+    "description": "Click CLI command for running flake8 and code style linters"
+  }
+]
+
