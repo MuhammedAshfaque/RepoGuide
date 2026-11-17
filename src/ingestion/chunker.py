@@ -54,6 +54,8 @@ class Chunk(Document):
         has_docstring: bool = False,
         **kwargs,
     ):
+        # ChromaDB requires scalar metadata (disallows empty lists)
+        dec_str = ", ".join(decorators) if isinstance(decorators, list) else str(decorators or "")
         meta = {
             "file_path": file_path,
             "start_line": start_line,
@@ -62,7 +64,7 @@ class Chunk(Document):
             "chunk_type": chunk_type,
             "language": language,
             "parent_class": parent_class,
-            "decorators": decorators or [],
+            "decorators": dec_str,
             "has_docstring": has_docstring,
         }
         meta.update(kwargs.get("metadata", {}))
@@ -103,7 +105,10 @@ class Chunk(Document):
 
     @property
     def decorators(self) -> list[str]:
-        return self.metadata.get("decorators", [])
+        raw = self.metadata.get("decorators", "")
+        if isinstance(raw, list):
+            return raw
+        return [d.strip() for d in str(raw).split(",") if d.strip()]
 
     @property
     def has_docstring(self) -> bool:
