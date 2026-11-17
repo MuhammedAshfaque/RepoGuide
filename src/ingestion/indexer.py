@@ -86,6 +86,53 @@ def get_vector_store(repo_name: str) -> Chroma:
     )
 
 
+# ── Document Header Enrichment (for Embeddings, BM25, and Reranker) ──────────
+
+_HEADER_MARKER = " | File: "
+
+
+def add_metadata_header(doc: Document) -> Document:
+    """
+    Prepend chunk metadata (chunk_type, parent_class, symbol_name, file_path)
+    to page_content so embeddings, BM25, and the cross-encoder see the same
+    structural context as manual-v1. Line numbers in metadata stay unchanged.
+    """
+    m = doc.metadata
+    file_path = str(m.get("file_path") or "").replace("\\", "/")
+    symbol_name = str(m.get("symbol_name") or "")
+    chunk_type = str(m.get("chunk_type") or "")
+    parent_class = str(m.get("parent_class") or "")
+
+    prefix = ""
+    if symbol_name and symbol_name != "module":
+        if parent_class:
+            prefix = f"{chunk_type} {parent_class}.{symbol_name}"
+        else:
+            prefix = f"{chunk_type} {symbol_name}"
+
+    if prefix and file_path:
+        header = f"# {prefix}{_HEADER_MARKER}{file_path}"
+    elif file_path:
+        header = f"# File: {file_path}"
+    elif prefix:
+        header = f"# {prefix}"
+    else:
+        return doc
+
+    return Document(
+        page_content=f"{header}\n{doc.page_content}",
+        metadata=dict(m),
+    )
+
+
+def strip_metadata_header(text: str) -> str:
+    """Strip the synthetic metadata header line before displaying raw code in UI/prompts."""
+    first_line, sep, rest = text.partition("\n")
+    if sep and first_line.startswith("# ") and ("File: " in first_line):
+        return rest
+    return text
+
+
 # ── Document Serialization (for BM25Retriever) ───────────────────────────────
 
 def get_docs_path(repo_name: str) -> Path:
@@ -220,12 +267,12 @@ def index_repo(
             except Exception:
                 pass
 
-    # Step 3: Chunk all files into LangChain Documents
+    # Step 3: Chunk all files into LangChain Documents (with metadata header for retrieval)
     print(f"[indexer] Chunking {len(files)} files into LangChain Documents ...")
     all_docs: list[Document] = []
     for file_info in files:
         chunks = chunk_file(file_info)
-        all_docs.extend(chunks)
+        all_docs.extend(add_metadata_header(c) for c in chunks)
     print(f"[indexer] Generated {len(all_docs)} LangChain Documents.")
 
     if not all_docs:

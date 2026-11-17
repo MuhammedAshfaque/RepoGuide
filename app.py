@@ -21,7 +21,7 @@ from src.generation.chain import (
     stream_answer,
     verify_all_citations,
 )
-from src.ingestion.indexer import get_docs_path, index_repo
+from src.ingestion.indexer import get_docs_path, index_repo, strip_metadata_header
 from src.ingestion.loader import repo_name_from_url
 from src.retrieval.retrieval import clear_retriever_cache, get_retriever
 
@@ -85,7 +85,7 @@ def render_citations_and_snippets(
             lang = m.get("language") or "python"
 
             st.markdown(f"**Snippet [{idx}]** — `{file_line}` | `{chunk_type}` **{sym}**{parent}")
-            st.code(doc.page_content, language=lang, line_numbers=True)
+            st.code(strip_metadata_header(doc.page_content), language=lang, line_numbers=True)
 
 
 # ── Page Configuration & Session State ───────────────────────────────────────

@@ -78,6 +78,30 @@ class TestPromptAndFormatting:
         assert "[truncated due to length]" in out
         assert len(out) < len(big)
 
+    def test_metadata_header_enrichment_and_stripping(self):
+        from src.ingestion.indexer import add_metadata_header, strip_metadata_header
+
+        raw = Document(
+            page_content="def check_password(self, val):\n    return True",
+            metadata={
+                "file_path": "conduit\\user\\models.py",
+                "start_line": 33,
+                "end_line": 35,
+                "symbol_name": "check_password",
+                "chunk_type": "method",
+                "parent_class": "User",
+            },
+        )
+        enriched = add_metadata_header(raw)
+        assert enriched.page_content.startswith("# method User.check_password | File: conduit/user/models.py\n")
+        assert enriched.metadata["start_line"] == 33
+        assert enriched.metadata["end_line"] == 35
+        assert strip_metadata_header(enriched.page_content) == raw.page_content
+        # format_docs strips the synthetic header line so it's not duplicated
+        formatted = format_docs([enriched])
+        assert "# method User.check_password | File:" not in formatted
+        assert "def check_password(self, val):" in formatted
+
 
 # ── 2. Model Factory Tests ───────────────────────────────────────────────────
 

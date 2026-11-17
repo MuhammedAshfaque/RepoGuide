@@ -34,6 +34,7 @@ from src.config import (
     OLLAMA_BASE_URL,
     TOP_K_FINAL,
 )
+from src.ingestion.indexer import strip_metadata_header
 
 MAX_CHUNK_CHARS = 2500
 REFUSAL_MESSAGE = "I couldn't find this in the codebase."
@@ -235,7 +236,7 @@ def format_docs(
         parent = f" in {m['parent_class']}" if m.get("parent_class") else ""
 
         header = f"--- Snippet [{idx}]: {file_path}:{start}-{end} ({chunk_type}: {symbol}{parent}) ---"
-        content = doc.page_content.strip()
+        content = strip_metadata_header(doc.page_content).strip()
         if len(content) > max_chunk_chars:
             content = content[:max_chunk_chars] + "\n... [truncated due to length]"
 
