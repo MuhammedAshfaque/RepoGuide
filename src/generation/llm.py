@@ -8,13 +8,17 @@ Enables swappable LLM backends:
 Provides explicit error handling if Ollama is stopped or the model is not pulled.
 """
 
+import json
 from abc import ABC, abstractmethod
 from typing import Iterator
+import requests
 
 from src.config import (
     LLM_PROVIDER,
     LLM_MODEL,
     OLLAMA_BASE_URL,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
     LLM_NUM_CTX,
     LLM_TEMPERATURE,
 )
@@ -194,6 +198,123 @@ class OllamaProvider(LLMProvider):
             raise RuntimeError(f"Ollama streaming failed: {exc}") from exc
 
 
+# ── Gemini Provider (Cloud API Fallback) ────────────────────────────────────
+
+class GeminiProvider(LLMProvider):
+    """
+    Google Gemini Cloud LLM provider.
+
+    Calls Google's Gemini API directly over REST using standard HTTP requests.
+    Requires GEMINI_API_KEY set in .env. Enables running hosted demos on free cloud
+    environments where running Ollama/local GPUs is not possible.
+    """
+
+    def __init__(
+        self,
+        api_key: str = GEMINI_API_KEY,
+        model: str = GEMINI_MODEL,
+        temperature: float = LLM_TEMPERATURE,
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+
+    def check_health(self) -> tuple[bool, str]:
+        """Check if GEMINI_API_KEY is configured in .env."""
+        if not self.api_key or not self.api_key.strip():
+            return (
+                False,
+                "GEMINI_API_KEY is not configured in your .env file. "
+                "Get a free key at https://aistudio.google.com/ and add GEMINI_API_KEY=... to .env",
+            )
+        return (True, f"Gemini API configured (model: {self.model})")
+
+    def _build_payload(self, prompt: str, system_prompt: str = "") -> dict:
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": self.temperature,
+            },
+        }
+        if system_prompt:
+            payload["system_instruction"] = {
+                "parts": [{"text": system_prompt}]
+            }
+        return payload
+
+    def generate(self, prompt: str, system_prompt: str = "") -> str:
+        """Generate response via Gemini REST API."""
+        healthy, message = self.check_health()
+        if not healthy:
+            raise RuntimeError(message)
+
+        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+        payload = self._build_payload(prompt, system_prompt)
+
+        try:
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Gemini API error (HTTP {resp.status_code}): {resp.text}"
+                )
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ""
+            parts = candidates[0].get("content", {}).get("parts", [])
+            return "".join(p.get("text", "") for p in parts)
+        except Exception as exc:
+            raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+
+    def stream(self, prompt: str, system_prompt: str = "") -> Iterator[str]:
+        """Stream tokens from Gemini API via Server-Sent Events."""
+        healthy, message = self.check_health()
+        if not healthy:
+            raise RuntimeError(message)
+
+        url = f"{self.base_url}/{self.model}:streamGenerateContent?alt=sse&key={self.api_key}"
+        payload = self._build_payload(prompt, system_prompt)
+
+        try:
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                stream=True,
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Gemini streaming error (HTTP {resp.status_code}): {resp.text}"
+                )
+
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                line_str = line.decode("utf-8")
+                if line_str.startswith("data: "):
+                    json_str = line_str[6:].strip()
+                    try:
+                        chunk_data = json.loads(json_str)
+                        candidates = chunk_data.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            for p in parts:
+                                text = p.get("text", "")
+                                if text:
+                                    yield text
+                    except Exception:
+                        continue
+        except Exception as exc:
+            raise RuntimeError(f"Gemini streaming failed: {exc}") from exc
+
+
 # ── Provider Factory ─────────────────────────────────────────────────────────
 
 def get_llm_provider(
@@ -204,21 +325,24 @@ def get_llm_provider(
     Factory to instantiate the configured LLM provider.
 
     Args:
-        provider_name: 'ollama' (default) or future providers ('gemini', 'groq').
-        model_name: Model identifier (defaults to LLM_MODEL from config).
+        provider_name: 'ollama' (default) or 'gemini'.
+        model_name: Model identifier (defaults to LLM_MODEL or GEMINI_MODEL).
 
     Returns:
         An instance implementing the LLMProvider interface.
     """
     provider = (provider_name or LLM_PROVIDER).lower()
-    model = model_name or LLM_MODEL
 
     if provider == "ollama":
+        model = model_name or LLM_MODEL
         return OllamaProvider(model=model)
+    elif provider == "gemini":
+        model = model_name or GEMINI_MODEL
+        return GeminiProvider(model=model)
     else:
         raise ValueError(
             f"Unsupported LLM provider: '{provider}'. "
-            f"Supported providers: ['ollama']"
+            f"Supported providers: ['ollama', 'gemini']"
         )
 
 

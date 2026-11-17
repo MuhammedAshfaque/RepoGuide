@@ -22,11 +22,14 @@ DATA_DIR.mkdir(exist_ok=True)
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
 LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen2.5-coder:3b")
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 LLM_NUM_CTX: int = 4096          # context window size for Ollama
 LLM_TEMPERATURE: float = 0.1    # low temperature → deterministic answers
 
 # ── Embedding Settings ───────────────────────────────────────────────────────
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 # ── Retrieval Settings ───────────────────────────────────────────────────────
 TOP_K_RETRIEVAL: int = int(os.getenv("TOP_K_RETRIEVAL", "20"))

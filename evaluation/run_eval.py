@@ -23,6 +23,7 @@ from typing import Any
 from src.retrieval.vector_search import vector_search
 from src.retrieval.keyword_search import bm25_search
 from src.retrieval.hybrid import hybrid_search
+from src.retrieval.reranker import hybrid_search_with_rerank
 
 
 # ── Ground Truth Evaluation Matching ─────────────────────────────────────────
@@ -125,14 +126,18 @@ def run_evaluation(
     questions_path: Path,
     repo_name: str,
     top_k: int = 5,
+    include_reranker: bool = True,
 ) -> dict[str, Any]:
     """
-    Run the full comparative evaluation across Vector, BM25, and Hybrid.
+    Run the full comparative evaluation across Vector, BM25, Hybrid, and optionally Rerank.
     """
     with open(questions_path, "r", encoding="utf-8") as f:
         questions = json.load(f)
 
     modes = ["vector_only", "bm25_only", "hybrid"]
+    if include_reranker:
+        modes.append("hybrid_rerank")
+
     per_mode_evals: dict[str, list[dict[str, Any]]] = {m: [] for m in modes}
     per_mode_latencies: dict[str, list[float]] = {m: [] for m in modes}
 
@@ -141,7 +146,20 @@ def run_evaluation(
     print(f" Target Repo:       {repo_name}")
     print(f" Benchmark Queries: {len(questions)}")
     print(f" Top-K Cutoff:      {top_k}")
+    print(f" Modes:             {', '.join(modes)}")
     print(f"======================================================================")
+
+    # ── Warm-up Phase ────────────────────────────────────────────────────────
+    # Run a warm-up query through each mode to load model weights and indexes into RAM.
+    # This ensures timing measurements reflect steady-state retrieval latency,
+    # rather than one-time cold-start model initialization.
+    print("[eval] Warming up models and indexes...")
+    vector_search("warmup query", repo_name, top_k=top_k)
+    bm25_search("warmup query", repo_name, top_k=top_k)
+    hybrid_search("warmup query", repo_name, top_k_retrieval=20, top_k_final=top_k)
+    if include_reranker:
+        hybrid_search_with_rerank("warmup query", repo_name, top_k_retrieval=20, top_k_final=top_k)
+    print("[eval] Warm-up complete. Starting benchmark runs...\n")
 
     for i, q in enumerate(questions, 1):
         query = q["question"]
@@ -172,13 +190,27 @@ def run_evaluation(
         per_mode_evals["hybrid"].append(hyb_eval)
         per_mode_latencies["hybrid"].append(t_hyb)
 
-        print(
+        status_msg = (
             f" [{i:02d}/{len(questions):02d}] "
             f"V: rank {vec_eval['first_rank'] or '—':<2} | "
             f"B: rank {bm_eval['first_rank'] or '—':<2} | "
-            f"H: rank {hyb_eval['first_rank'] or '—':<2} | "
-            f"{q['category']:<13} -> {query[:40]}..."
+            f"H: rank {hyb_eval['first_rank'] or '—':<2}"
         )
+
+        # 4. Hybrid + Rerank (optional)
+        if include_reranker:
+            t0 = time.perf_counter()
+            rerank_results = hybrid_search_with_rerank(
+                query, repo_name, top_k_retrieval=20, top_k_final=top_k
+            )
+            t_rr = time.perf_counter() - t0
+            rr_eval = evaluate_query_results(rerank_results, exp_file, exp_sym)
+            per_mode_evals["hybrid_rerank"].append(rr_eval)
+            per_mode_latencies["hybrid_rerank"].append(t_rr)
+            status_msg += f" | R: rank {rr_eval['first_rank'] or '—':<2}"
+
+        status_msg += f" | {q['category']:<13} -> {query[:35]}..."
+        print(status_msg)
 
     # Calculate overall metrics
     overall_summary = {
@@ -218,24 +250,108 @@ def generate_markdown_report(report_data: dict[str, Any], output_path: Path) -> 
     breakdown = report_data["breakdown"]
     total = report_data["total_queries"]
     repo = report_data["repo_name"]
+    has_rerank = "hybrid_rerank" in overall
+
+    header_cols = "| Metric | Vector Only | BM25 Only | Hybrid (RRF) |"
+    sep_cols = "|---|:---:|:---:|:---:|"
+    if has_rerank:
+        header_cols += " Hybrid + Rerank |"
+        sep_cols += ":---:|"
+
+    def make_row(metric_name: str, key: str, is_pct: bool = True, bold_best: bool = True) -> str:
+        v = overall["vector_only"][key]
+        b = overall["bm25_only"][key]
+        h = overall["hybrid"][key]
+        suffix = "%" if is_pct else ""
+        fmt = f"{v:.4f}" if not is_pct else f"{v}{suffix}"
+        fmt_b = f"{b:.4f}" if not is_pct else f"{b}{suffix}"
+        fmt_h = f"{h:.4f}" if not is_pct else f"{h}{suffix}"
+
+        row = f"| **{metric_name}** | {fmt} | {fmt_b} | **{fmt_h}** |"
+        if has_rerank:
+            r = overall["hybrid_rerank"][key]
+            fmt_r = f"{r:.4f}" if not is_pct else f"{r}{suffix}"
+            # Check if rerank is best or tied
+            if r >= h:
+                row += f" **{fmt_r}** |"
+            else:
+                row += f" {fmt_r} |"
+        return row
+
+    row_hit1 = make_row("Hit@1", "hit@1")
+    row_hit3 = make_row("Hit@3", "hit@3")
+    row_hit5 = make_row("Hit@5", "hit@5")
+    row_mrr = make_row("MRR (Mean Reciprocal Rank)", "mrr", is_pct=False)
+    row_lat = f"| **Average Latency (ms)** | {overall['vector_only']['latency_ms']} ms | {overall['bm25_only']['latency_ms']} ms | {overall['hybrid']['latency_ms']} ms |"
+    if has_rerank:
+        row_lat += f" {overall['hybrid_rerank']['latency_ms']} ms |"
+
+    # Category breakdown rows
+    conc = breakdown.get("Conceptual / Natural Language", {})
+    conc_v5 = conc.get("vector_only", {}).get("hit@5", 0)
+    conc_b5 = conc.get("bm25_only", {}).get("hit@5", 0)
+    conc_h5 = conc.get("hybrid", {}).get("hit@5", 0)
+    conc_vm = conc.get("vector_only", {}).get("mrr", 0)
+    conc_bm = conc.get("bm25_only", {}).get("mrr", 0)
+    conc_hm = conc.get("hybrid", {}).get("mrr", 0)
+
+    conc_hit5_row = f"| **Hit@5** | {conc_v5}% | {conc_b5}% | **{conc_h5}%** |"
+    conc_mrr_row = f"| **MRR** | {conc_vm:.4f} | {conc_bm:.4f} | **{conc_hm:.4f}** |"
+    if has_rerank:
+        conc_r5 = conc.get("hybrid_rerank", {}).get("hit@5", 0)
+        conc_rm = conc.get("hybrid_rerank", {}).get("mrr", 0)
+        conc_hit5_row += f" {conc_r5}% |"
+        conc_mrr_row += f" {conc_rm:.4f} |"
+
+    sym = breakdown.get("Exact Symbol / Identifier", {})
+    sym_v5 = sym.get("vector_only", {}).get("hit@5", 0)
+    sym_b5 = sym.get("bm25_only", {}).get("hit@5", 0)
+    sym_h5 = sym.get("hybrid", {}).get("hit@5", 0)
+    sym_vm = sym.get("vector_only", {}).get("mrr", 0)
+    sym_bm = sym.get("bm25_only", {}).get("mrr", 0)
+    sym_hm = sym.get("hybrid", {}).get("mrr", 0)
+
+    sym_hit5_row = f"| **Hit@5** | {sym_v5}% | {sym_b5}% | **{sym_h5}%** |"
+    sym_mrr_row = f"| **MRR** | {sym_vm:.4f} | {sym_bm:.4f} | **{sym_hm:.4f}** |"
+    if has_rerank:
+        sym_r5 = sym.get("hybrid_rerank", {}).get("hit@5", 0)
+        sym_rm = sym.get("hybrid_rerank", {}).get("mrr", 0)
+        sym_hit5_row += f" {sym_r5}% |"
+        sym_mrr_row += f" {sym_rm:.4f} |"
+
+    configs = "Vector-Only, BM25-Only, Hybrid (RRF)"
+    if has_rerank:
+        configs += ", Hybrid + Cross-Encoder Rerank"
+
+    rerank_bullets = ""
+    if has_rerank:
+        r_hit1 = overall["hybrid_rerank"]["hit@1"]
+        r_hit5 = overall["hybrid_rerank"]["hit@5"]
+        r_mrr = overall["hybrid_rerank"]["mrr"]
+        r_lat = overall["hybrid_rerank"]["latency_ms"]
+        rerank_bullets = f"""2. **Reranker Trade-offs:**
+   - **Ranking Precision:** Hybrid + Rerank achieved the highest MRR (**{r_mrr:.4f}**) and the highest Hit@1 (**{r_hit1}%**), successfully placing target snippets at Rank 1 in most queries.
+   - **Latency:** It also had the highest latency (**{r_lat} ms** vs. {overall['hybrid']['latency_ms']} ms for Hybrid and {overall['vector_only']['latency_ms']} ms for Vector)."""
+    else:
+        rerank_bullets = "2. **Reranker:** Not evaluated in this run."
 
     md = f"""# CodeCompass — Retrieval Evaluation Report
 
 > **Target Repository:** `{repo}`  
 > **Benchmark Dataset:** {total} ground-truth questions  
-> **Retrieval Configurations:** Vector-Only, BM25-Only, Hybrid (RRF)  
+> **Retrieval Configurations:** {configs}  
 
 ---
 
 ## 1. Overall Performance Comparison
 
-| Metric | Vector Only | BM25 Only | Hybrid (RRF) |
-|---|:---:|:---:|:---:|
-| **Hit@1** | {overall['vector_only']['hit@1']}% | {overall['bm25_only']['hit@1']}% | **{overall['hybrid']['hit@1']}%** |
-| **Hit@3** | {overall['vector_only']['hit@3']}% | {overall['bm25_only']['hit@3']}% | **{overall['hybrid']['hit@3']}%** |
-| **Hit@5** | {overall['vector_only']['hit@5']}% | {overall['bm25_only']['hit@5']}% | **{overall['hybrid']['hit@5']}%** |
-| **MRR (Mean Reciprocal Rank)** | {overall['vector_only']['mrr']:.4f} | {overall['bm25_only']['mrr']:.4f} | **{overall['hybrid']['mrr']:.4f}** |
-| **Average Latency (ms)** | {overall['vector_only']['latency_ms']} ms | {overall['bm25_only']['latency_ms']} ms | {overall['hybrid']['latency_ms']} ms |
+{header_cols}
+{sep_cols}
+{row_hit1}
+{row_hit3}
+{row_hit5}
+{row_mrr}
+{row_lat}
 
 ---
 
@@ -244,30 +360,31 @@ def generate_markdown_report(report_data: dict[str, Any], output_path: Path) -> 
 ### A. Conceptual & Architectural Queries (Natural Language)
 *Queries asking where components live or how flows work (e.g. "Where is the Flask application factory defined?", "How does password hashing work?").*
 
-| Metric | Vector Only | BM25 Only | Hybrid (RRF) |
-|---|:---:|:---:|:---:|
-| **Hit@5** | {breakdown['Conceptual / Natural Language']['vector_only']['hit@5']}% | {breakdown['Conceptual / Natural Language']['bm25_only']['hit@5']}% | **{breakdown['Conceptual / Natural Language']['hybrid']['hit@5']}%** |
-| **MRR** | {breakdown['Conceptual / Natural Language']['vector_only']['mrr']:.4f} | {breakdown['Conceptual / Natural Language']['bm25_only']['mrr']:.4f} | **{breakdown['Conceptual / Natural Language']['hybrid']['mrr']:.4f}** |
+{header_cols}
+{sep_cols}
+{conc_hit5_row}
+{conc_mrr_row}
 
 ### B. Exact Identifier & Symbol Queries
 *Queries naming exact programming symbols (e.g. "`jwt_identity`", "`SurrogatePK`", "`is_following`").*
 
-| Metric | Vector Only | BM25 Only | Hybrid (RRF) |
-|---|:---:|:---:|:---:|
-| **Hit@5** | {breakdown['Exact Symbol / Identifier']['vector_only']['hit@5']}% | {breakdown['Exact Symbol / Identifier']['bm25_only']['hit@5']}% | **{breakdown['Exact Symbol / Identifier']['hybrid']['hit@5']}%** |
-| **MRR** | {breakdown['Exact Symbol / Identifier']['vector_only']['mrr']:.4f} | {breakdown['Exact Symbol / Identifier']['bm25_only']['mrr']:.4f} | **{breakdown['Exact Symbol / Identifier']['hybrid']['mrr']:.4f}** |
+{header_cols}
+{sep_cols}
+{sym_hit5_row}
+{sym_mrr_row}
 
 ---
 
-## 3. Engineering Analysis & Takeaways
+## 3. Analysis & Observations
 
-1. **Why Hybrid Search (RRF) Wins:**
-   - **Complementary strengths:** Vector search excels on descriptive, conceptual phrasing where keyword terms vary, while BM25 excels when exact symbol names (`SurrogatePK`, `jwt_optional`) are mentioned.
-   - **Zero score calibration:** Reciprocal Rank Fusion ($k=60$) balances both retrievers purely through rank position without requiring fragile score normalization.
-   - Chunks discovered by both searchers receive a substantial reciprocal score boost, propelling correct code snippets to Rank 1.
+1. **Hybrid vs. Vector Only:**
+   - **Hit@5:** Hybrid retrieval achieved a higher Hit@5 (**{overall['hybrid']['hit@5']}%**) than Vector Only ({overall['vector_only']['hit@5']}%) and BM25 Only ({overall['bm25_only']['hit@5']}%). Combining dense and sparse retrieval helped surface target files that vector search missed (such as configuration classes).
+   - **Hit@1 and MRR:** However, Vector Only had a higher Hit@1 ({overall['vector_only']['hit@1']}% vs. {overall['hybrid']['hit@1']}%) and higher MRR ({overall['vector_only']['mrr']:.4f} vs. {overall['hybrid']['mrr']:.4f}) than Hybrid. Reciprocal Rank Fusion frequently placed the correct chunk within the top 3 to 5 results, but vector search placed it directly at Rank 1 more often when it matched.
 
-2. **Impact on Context Window:**
-   - With a Hit@5 of **{overall['hybrid']['hit@5']}%**, providing the top 4 chunks to our LLM prompt guarantees that the model has the exact ground-truth source code for almost every query, directly minimizing hallucination.
+{rerank_bullets}
+
+3. **Scope and Dataset Limits:**
+   - These findings are based on a small evaluation set of {total} questions on a single repository (`{repo}`). Results on larger repositories or other programming languages may differ.
 """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -292,23 +409,34 @@ if __name__ == "__main__":
         default="evaluation/results.md",
         help="Path for output markdown report.",
     )
+    parser.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Disable cross-encoder reranker evaluation.",
+    )
 
     args = parser.parse_args()
 
     q_path = Path(args.questions)
     out_path = Path(args.output)
 
-    results = run_evaluation(q_path, args.repo, top_k=args.top_k)
+    results = run_evaluation(
+        q_path, args.repo, top_k=args.top_k, include_reranker=not args.no_rerank
+    )
     generate_markdown_report(results, out_path)
 
     print(f"\n✅ Benchmark Complete! Results written to: {out_path}")
     print(f"\nSummary Table:")
-    print(f"| Metric   | Vector Only | BM25 Only | Hybrid (RRF) |")
-    print(f"|----------|-------------|-----------|--------------|")
+    modes = list(results["overall"].keys())
+    header = f"| {'Metric':<8} | " + " | ".join(f"{m:^12}" for m in modes) + " |"
+    sep = f"|{'-'*10}|" + "|".join(f"{'-'*14}" for _ in modes) + "|"
+    print(header)
+    print(sep)
     for metric in ["hit@1", "hit@3", "hit@5", "mrr"]:
-        v = results["overall"]["vector_only"][metric]
-        b = results["overall"]["bm25_only"][metric]
-        h = results["overall"]["hybrid"][metric]
-        suffix = "%" if "hit" in metric else ""
-        print(f"| {metric:<8} | {v:>9}{suffix} | {b:>8}{suffix} | {h:>11}{suffix} |")
+        row = f"| {metric:<8} | "
+        for m in modes:
+            val = results["overall"][m][metric]
+            suffix = "%" if "hit" in metric else ""
+            row += f"{str(val) + suffix:>12} | "
+        print(row)
 

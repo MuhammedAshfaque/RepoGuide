@@ -20,8 +20,10 @@ Memory notes (8 GB RAM):
 
 import hashlib
 import json
+import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 from src.config import (
     DATA_DIR,
@@ -32,6 +34,60 @@ from src.config import (
 from src.ingestion.loader import load_files
 from src.ingestion.chunker import chunk_file, Chunk
 from src.retrieval.keyword_search import build_bm25_index, get_bm25_index_path
+
+
+# ── Metadata & Caching Helpers ───────────────────────────────────────────────
+
+def get_meta_path(repo_name: str) -> Path:
+    """Return the path to the repository metadata JSON file."""
+    return DATA_DIR / f"{repo_name}_meta.json"
+
+
+def compute_repo_fingerprint(files: list[dict], repo_dir: Optional[Path] = None) -> str:
+    """
+    Compute a unique fingerprint for a repository's content.
+
+    If the repository has a .git directory, uses the current commit SHA.
+    Otherwise, computes an MD5 checksum over sorted relative file paths, sizes,
+    and modification timestamps.
+    """
+    if repo_dir and (repo_dir / ".git").exists():
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_dir),
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            if sha:
+                return f"git:{sha}"
+        except Exception:
+            pass
+
+    # Fallback content hash over file paths, sizes, and mtimes
+    hasher = hashlib.md5()
+    sorted_files = sorted(files, key=lambda f: f["relative_path"])
+    for f in sorted_files:
+        p = Path(f["path"])
+        mtime = p.stat().st_mtime if p.exists() else 0
+        hasher.update(f"{f['relative_path']}:{f['size_kb']}:{mtime}".encode("utf-8"))
+
+    return f"content:{hasher.hexdigest()}"
+
+
+def is_repo_indexed(repo_name: str) -> bool:
+    """Check if both ChromaDB vector index and BM25 index exist and are non-empty."""
+    bm25_path = get_bm25_index_path(repo_name)
+    if not bm25_path.exists():
+        return False
+
+    client = get_chroma_client()
+    col_name = _collection_name(repo_name)
+    try:
+        col = client.get_collection(col_name)
+        return col.count() > 0
+    except Exception:
+        return False
 
 
 # ── ChromaDB + Embedding Globals ─────────────────────────────────────────────
@@ -124,8 +180,11 @@ def index_repo(
         repo_name = Path(source).name
 
     col_name = _collection_name(repo_name)
+    repo_dir = Path(source) if Path(source).is_dir() else (DATA_DIR / repo_name)
+    current_fingerprint = compute_repo_fingerprint(files, repo_dir=repo_dir)
+    meta_path = get_meta_path(repo_name)
 
-    # ── Step 2: Check if already indexed ──────────────────────────────
+    # ── Step 2: Check if already indexed with fingerprint ─────────────
     client = get_chroma_client()
     bm25_path = get_bm25_index_path(repo_name)
 
@@ -134,16 +193,38 @@ def index_repo(
             existing = client.get_collection(col_name)
             count = existing.count()
             if count > 0:
-                print(f"[indexer] Collection '{col_name}' and BM25 index already exist ({count} chunks). "
-                      f"Skipping. Use force_reindex=True to re-index.")
-                return {
-                    "repo_name": repo_name,
-                    "total_files": len(files),
-                    "total_chunks": count,
-                    "collection_name": col_name,
-                    "duration_seconds": round(time.time() - start_time, 2),
-                    "skipped": True,
-                }
+                # If metadata exists, verify fingerprint
+                if meta_path.exists():
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            meta = json.load(f)
+                        if meta.get("fingerprint") == current_fingerprint:
+                            print(f"[indexer] Repository '{repo_name}' is unchanged (fingerprint: {current_fingerprint[:16]}...). "
+                                  f"Skipping re-indexing. Use force_reindex=True to override.")
+                            return {
+                                "repo_name": repo_name,
+                                "total_files": len(files),
+                                "total_chunks": count,
+                                "collection_name": col_name,
+                                "duration_seconds": round(time.time() - start_time, 2),
+                                "skipped": True,
+                                "fingerprint": current_fingerprint,
+                            }
+                    except Exception:
+                        pass
+                else:
+                    # Legacy index without meta file
+                    print(f"[indexer] Collection '{col_name}' and BM25 index already exist ({count} chunks). "
+                          f"Skipping. Use force_reindex=True to re-index.")
+                    return {
+                        "repo_name": repo_name,
+                        "total_files": len(files),
+                        "total_chunks": count,
+                        "collection_name": col_name,
+                        "duration_seconds": round(time.time() - start_time, 2),
+                        "skipped": True,
+                        "fingerprint": current_fingerprint,
+                    }
         except Exception:
             pass  # Collection doesn't exist yet, proceed
 
@@ -238,6 +319,23 @@ def index_repo(
     print(f"[indexer] Building and saving BM25 keyword index ...")
     build_bm25_index(all_chunks, repo_name)
 
+    # ── Step 6: Save metadata & content fingerprint ───────────────────
+    meta_data = {
+        "repo_name": repo_name,
+        "source": str(source),
+        "fingerprint": current_fingerprint,
+        "total_files": len(files),
+        "total_chunks": len(all_chunks),
+        "collection_name": col_name,
+        "indexed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "embedding_model": EMBEDDING_MODEL,
+    }
+    try:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_data, f, indent=2)
+    except Exception as e:
+        print(f"[indexer] Warning: could not write metadata cache file: {e}")
+
     duration = round(time.time() - start_time, 2)
     print(f"[indexer] ✅ Indexing complete! {len(all_chunks)} chunks "
           f"in {duration}s")
@@ -249,6 +347,7 @@ def index_repo(
         "collection_name": col_name,
         "duration_seconds": duration,
         "skipped": False,
+        "fingerprint": current_fingerprint,
     }
 
 

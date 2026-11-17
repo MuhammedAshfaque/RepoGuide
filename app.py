@@ -68,6 +68,9 @@ def retrieve_by_mode(
     """Dispatch query to selected retrieval engine."""
     if mode == "Hybrid (Vector + BM25 via RRF)":
         return hybrid_search(query, repo_name, top_k_retrieval=20, top_k_final=top_k)
+    elif mode == "Hybrid + Rerank":
+        from src.retrieval.reranker import hybrid_search_with_rerank
+        return hybrid_search_with_rerank(query, repo_name, top_k_retrieval=20, top_k_final=top_k)
     elif mode == "Vector Only":
         return vector_search(query, repo_name, top_k=top_k)
     elif mode == "BM25 Only":
@@ -83,14 +86,22 @@ with st.sidebar:
     st.caption("A Codebase Onboarding Assistant using RAG")
     st.divider()
 
-    # 1. LLM Backend Status Check
+    # 1. LLM Backend Status Check & Provider Selection
     st.subheader("🤖 LLM Backend")
-    llm = get_llm_provider()
+    provider_option = st.selectbox(
+        "Provider:",
+        options=["Ollama (Local)", "Gemini (Cloud API)"],
+        index=0,
+        help="Select local Ollama or Google Gemini Cloud API (configured via .env)",
+    )
+    chosen_provider = "gemini" if "Gemini" in provider_option else "ollama"
+
+    llm = get_llm_provider(provider_name=chosen_provider)
     is_healthy, health_msg = llm.check_health()
     if is_healthy:
-        st.success(f"**Connected**: `{LLM_MODEL}`")
+        st.success(f"**Connected**: `{getattr(llm, 'model', chosen_provider)}`")
     else:
-        st.error("**Ollama Offline or Model Missing**")
+        st.error("**Provider Offline or Unconfigured**")
         st.info(health_msg)
 
     st.divider()
@@ -141,11 +152,12 @@ with st.sidebar:
         "Search Engine Mode:",
         options=[
             "Hybrid (Vector + BM25 via RRF)",
+            "Hybrid + Rerank",
             "Vector Only",
             "BM25 Only",
         ],
         index=0,
-        help="Compare semantic search vs exact identifier keyword matching.",
+        help="Compare semantic search vs exact identifier keyword matching vs cross-encoder reranking.",
     )
 
     top_k_chunks = st.slider(
@@ -270,7 +282,12 @@ if user_query:
                         sym = chunk.get("symbol_name") or "(block)"
                         parent = f" in {chunk['parent_class']}" if chunk.get("parent_class") else ""
                         file_line = f"{chunk['file_path']}:{chunk['start_line']}-{chunk['end_line']}"
-                        score_info = f"score: {chunk.get('score', 0.0):.4f}" if "score" in chunk else ""
+                        if "rerank_score" in chunk:
+                            score_info = f"rerank score: {chunk['rerank_score']:.4f}"
+                        elif "score" in chunk:
+                            score_info = f"score: {chunk['score']:.4f}"
+                        else:
+                            score_info = ""
 
                         st.markdown(f"**Snippet [{idx}]** — `{file_line}` | `{chunk.get('chunk_type', 'code')}` **{sym}**{parent} ({score_info})")
                         lang = chunk.get("language") or "python"

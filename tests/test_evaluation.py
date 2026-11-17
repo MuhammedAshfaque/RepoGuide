@@ -207,6 +207,6 @@ class TestGenerateMarkdownReport:
         assert "Hit@1" in content
         assert "Hit@5" in content
         assert "MRR (Mean Reciprocal Rank)" in content
-        assert "Why Hybrid Search (RRF) Wins" in content
+        assert "Analysis & Observations" in content
         assert "100.0%" in content
 
