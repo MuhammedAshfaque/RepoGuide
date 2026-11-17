@@ -103,11 +103,28 @@ def get_vector_retriever(repo_name: str, top_k: int = TOP_K_FINAL):
     return vs.as_retriever(search_kwargs={"k": top_k})
 
 
+class _PositiveBM25Retriever(BM25Retriever):
+    """BM25Retriever that excludes zero-score documents so noise cannot enter RRF fusion."""
+
+    def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
+        tokens = self.preprocess_func(query)
+        if not tokens:
+            return []
+        scores = self.vectorizer.get_scores(tokens)
+        scored = sorted(
+            ((s, doc) for s, doc in zip(scores, self.docs) if s > 0.0),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        return [doc for _, doc in scored[: self.k]]
+
+
 def get_bm25_retriever(repo_name: str, top_k: int = TOP_K_FINAL) -> BM25Retriever:
     """
     Return a LangChain BM25Retriever using our identifier-aware tokenizer.
 
-    Loads serialized Documents saved by the indexer and caches the retriever.
+    Loads serialized Documents saved by the indexer, filters out zero-score
+    matches, and caches the retriever.
     """
     col_name = get_collection_name(repo_name)
     cache_key = (col_name, top_k)
@@ -121,7 +138,7 @@ def get_bm25_retriever(repo_name: str, top_k: int = TOP_K_FINAL) -> BM25Retrieve
             "Please run index_repo() first."
         )
 
-    retriever = BM25Retriever.from_documents(
+    retriever = _PositiveBM25Retriever.from_documents(
         docs,
         preprocess_func=tokenize_code,
         k=top_k,
