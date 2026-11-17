@@ -13,15 +13,15 @@
 | **3** | Indexing and basic retrieval | ✅ Complete |
 | **4** | Hybrid search (BM25 + RRF) | ✅ Complete |
 | **5** | Generation with citations | ✅ Complete |
-| **6** | Streamlit UI | ⏳ Up next |
-| **7** | Evaluation | 🔲 Not started |
+| **6** | Streamlit UI | ✅ Complete |
+| **7** | Evaluation | ⏳ Up next |
 | **8** | Polish and deploy | 🔲 Not started |
 
 ---
 
-## Current Phase: 6 — Streamlit UI
+## Current Phase: 7 — Evaluation (Critical)
 
-**Goal:** Repo URL input, an "Index repo" button with progress indicator, chat interface with streaming answers, expandable source snippets with syntax highlighting, and sidebar search mode toggle (vector / BM25 / hybrid).
+**Goal:** Create `evaluation/eval_questions.json` with 30+ ground-truth Q&A pairs (expected file/symbol), implement `evaluation/run_eval.py` computing Hit@k and MRR across Vector, BM25, and Hybrid modes, and output comparison table in `evaluation/results.md`.
 
 **Status:** Waiting for user to say "continue".
 
@@ -35,8 +35,9 @@ codecompass/
 ├── .env                          # Local settings (gitignored)
 ├── .env.example                  # Template showing all config keys
 ├── .gitignore                    # Ignores venv/, data/, .env, etc.
-├── requirements.txt              # Dependencies (Phase 1 active, rest commented)
+├── requirements.txt              # Dependencies (Phases 1-6 active)
 ├── PROGRESS.md                   # ← This file — project progress tracker
+├── app.py                        # Streamlit web UI (streaming chat, snippets, mode toggle)
 │
 ├── src/
 │   ├── __init__.py               # Makes src a Python package
@@ -75,7 +76,8 @@ codecompass/
 │   ├── test_loader.py            # 25 tests: URL parsing, filtering, integration
 │   ├── test_chunker.py           # 49 tests: AST chunker, fallback chunker, edge cases
 │   ├── test_hybrid.py            # 19 tests: tokenization, BM25 indexing, RRF ranking math
-│   └── test_generation.py        # 13 tests: prompt rules, citation regex & verification, mock LLM
+│   ├── test_generation.py        # 13 tests: prompt rules, citation regex & verification, mock LLM
+│   └── test_ui.py                # 5 tests: repo name resolver, index check, retrieval routing
 │
 ├── evaluation/                   # (Phase 7: eval questions, metrics, results)
 │
@@ -100,7 +102,9 @@ codecompass/
 | `src/generation/llm.py` | **Provider-agnostic LLM interface.** Abstract `LLMProvider` with `generate()` and `stream()` methods. Concrete `OllamaProvider` connects to local Ollama (`qwen2.5-coder:3b`) with health checks, error diagnosis, `num_ctx=4096`, and `temperature=0.1`. CLI: `python -m src.generation.llm`. |
 | `src/generation/prompts.py` | **Strict prompt templates.** Instructs LLM to answer only from context snippets, cite exact lines (`path:start-end`), and return `"I couldn't find this in the codebase"` if context is insufficient. Includes few-shot positive and negative citation examples. Formats chunks with truncation protection. |
 | `src/generation/answerer.py` | **End-to-end RAG question answering.** Coordinates retrieval → prompt formatting → LLM generation → citation post-verification. Parses all citations in the answer and validates that the cited file and lines actually overlap with retrieved chunks. CLI: `python -m src.generation.answerer <repo> <query>`. |
-| `tests/test_generation.py` | **13 pytest tests** covering prompt rules, few-shot presence, chunk truncation, citation extraction regex, citation verification logic (valid, boundary margin, out-of-range, wrong file), and full pipeline testing using a `MockLLMProvider`. Total test suite: **106 passed**. |
+| `tests/test_generation.py` | **13 pytest tests** covering prompt rules, few-shot presence, chunk truncation, citation extraction regex, citation verification logic (valid, boundary margin, out-of-range, wrong file), and full pipeline testing using a `MockLLMProvider`. |
+| `tests/test_ui.py` | **5 pytest tests** covering UI helper functions: repository name resolution from URLs and local relative/absolute paths, index status checking, and retrieval engine routing across all three modes. Total test suite: **111 passed**. |
+| `app.py` | **Interactive Streamlit web application.** Provides repo URL / path input, one-click indexing with progress spinner, real-time token streaming chat interface, post-generation citation validation display, expandable syntax-highlighted code blocks, and a live toggle between Hybrid, Vector-only, and BM25-only search modes. |
 
 ---
 
@@ -125,6 +129,9 @@ codecompass/
 | **Few-shot citations for 3B LLM** | Small models like `qwen2.5-coder:3b` are fast and memory-friendly on 8 GB RAM, but follow zero-shot format instructions unreliably. Providing concrete few-shot examples anchors exact citation syntax (`file.py:start-end`) and grounded negative responses. |
 | **Citation post-verification** | Programmatically regex-extracts every citation in the generated text and checks that the cited file path and line numbers genuinely overlap with retrieved chunks. Detects hallucinations before displaying answers to users. |
 | **Provider-agnostic LLM interface** | All generation logic is decoupled behind the `LLMProvider` abstract base class, allowing effortless switching to cloud providers (Gemini, Groq, OpenAI) later without modifying the answerer or UI. |
+| **Token streaming in chat UI** | Local 3B models on CPU/consumer RAM take 5–15s for full multi-paragraph responses. Token streaming drops perceived latency to <1s, providing immediate visual feedback as words appear. |
+| **Search mode toggle in UI** | Allows users and interviewers to compare Vector, BM25, and Hybrid results dynamically on the same query to observe where semantic search vs exact keyword matching excels. |
+| **Concurrency & RAM protection** | Prevents simultaneous indexing and LLM generation within the session state, avoiding memory spikes on 8 GB RAM systems. |
 
 ---
 
@@ -136,24 +143,15 @@ codecompass/
 |--------|-------|
 | Total files loaded | 41 |
 | Total chunks generated | 192 |
-| Total test suite | **106 passed (100%)** |
+| Total test suite | **111 passed (100%)** |
 | ChromaDB vector index | Persistent at `data/chroma_db/` |
 | BM25 index | Serialized at `data/flask-realworld-example-app_bm25.pkl` |
-| LLM Model | `qwen2.5-coder:3b` (via local Ollama) |
-
-**Sample Q&A 1 (Positive grounded test):**
-- **Query:** *"Where is user authentication handled?"*
-- **Generated Answer:** `"User authentication is handled in conduit/user/views.py:30-40 through the login_user endpoint (POST /api/users/login)."`
-- **Citation Audit:** `['conduit/user/views.py:30-40']` verified against retrieved chunk #3. `Grounded in Context: YES ✅`
-
-**Sample Q&A 2 (Negative ungrounded refusal test):**
-- **Query:** *"How does the application process Stripe payments?"*
-- **Generated Answer:** `"I couldn't find this in the codebase. The provided code snippets do not mention Stripe payments or payment processing."`
-- **Citation Audit:** `No citations present.` `Grounded in Context: YES ✅`
+| Web Interface | Streamlit on `http://localhost:8501` |
+| Features verified | Repo indexing, streaming generation, citations audit, syntax-highlighted snippets, mode toggle |
 
 ---
 
 ## Next Step
 
-Phase 6: Build `app.py` — Streamlit web interface with repo URL indexing, streaming chat responses, expandable syntax-highlighted code snippets, and search mode toggle (Vector / BM25 / Hybrid).
+Phase 7: Build `evaluation/eval_questions.json` (30+ benchmark Q&A pairs), `evaluation/run_eval.py` (Hit@5 and MRR evaluation across Vector, BM25, and Hybrid), and generate `evaluation/results.md`.
 
