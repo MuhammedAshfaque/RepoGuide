@@ -7,8 +7,6 @@ These tests verify:
   - load_files returns the right structure
 """
 
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -82,43 +80,43 @@ class TestShouldIncludeFile:
 
     def test_python_file_included(self):
         f = self._make_file("app.py")
-        assert _should_include_file(f, self.repo_root) is True
+        assert _should_include_file(f) is True
 
     def test_js_file_included(self):
         f = self._make_file("index.js")
-        assert _should_include_file(f, self.repo_root) is True
+        assert _should_include_file(f) is True
 
     def test_markdown_included(self):
         f = self._make_file("README.md")
-        assert _should_include_file(f, self.repo_root) is True
+        assert _should_include_file(f) is True
 
     def test_binary_image_excluded(self):
         f = self._make_file("logo.png")
-        assert _should_include_file(f, self.repo_root) is False
+        assert _should_include_file(f) is False
 
     def test_lock_file_excluded(self):
         f = self._make_file("package-lock.json")
-        assert _should_include_file(f, self.repo_root) is False
+        assert _should_include_file(f) is False
 
     def test_unknown_extension_excluded(self):
         f = self._make_file("data.xyz")
-        assert _should_include_file(f, self.repo_root) is False
+        assert _should_include_file(f) is False
 
     def test_oversized_file_excluded(self):
         # Create a file just over the MAX_FILE_SIZE_KB limit
         size = (MAX_FILE_SIZE_KB + 1) * 1024
         f = self._make_file("big_file.py", size_bytes=size)
-        assert _should_include_file(f, self.repo_root) is False
+        assert _should_include_file(f) is False
 
     def test_file_just_under_limit_included(self):
         size = (MAX_FILE_SIZE_KB - 1) * 1024
         f = self._make_file("ok_file.py", size_bytes=size)
-        assert _should_include_file(f, self.repo_root) is True
+        assert _should_include_file(f) is True
 
     def test_no_extension_file_included(self):
         """Files like Makefile, Dockerfile with no extension should be kept."""
         f = self._make_file("Makefile")
-        assert _should_include_file(f, self.repo_root) is True
+        assert _should_include_file(f) is True
 
 
 # ── Integration: load_files on a fake local directory ────────────────────────
