@@ -1,6 +1,8 @@
 """LCEL generation chain (ChatOllama / Gemini), strict citation prompt, and regex citation audit."""
 
+import json
 import re
+import urllib.request
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
@@ -100,31 +102,27 @@ def get_chat_model(provider: Optional[str] = None, model: Optional[str] = None) 
 
 
 def check_llm_health(provider: Optional[str] = None, model: Optional[str] = None) -> tuple[bool, str]:
-    """Return (is_healthy, message) for the selected LLM provider."""
+    """Return (is_healthy, status_message) for the selected LLM provider."""
     chosen = (provider or LLM_PROVIDER).lower().strip()
     if chosen == "gemini":
         if not GEMINI_API_KEY.strip():
             return False, "GEMINI_API_KEY is not configured in .env."
         return True, f"Gemini API configured ({model or GEMINI_MODEL})"
-
     if chosen != "ollama":
         return False, f"Unsupported LLM provider: '{chosen}'"
 
-    target = (model or LLM_MODEL).lower()
+    target = model or LLM_MODEL
     try:
-        import ollama
-        resp = ollama.Client(host=OLLAMA_BASE_URL).list()
-        models = getattr(resp, "models", None) or (resp.get("models", []) if isinstance(resp, dict) else [])
+        with urllib.request.urlopen(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags", timeout=3) as resp:
+            models = json.loads(resp.read().decode("utf-8")).get("models", [])
     except Exception as exc:
         return False, f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. ({exc})"
 
-    names = [
-        (getattr(m, "model", None) or getattr(m, "name", None) or (m.get("model") if isinstance(m, dict) else "") or "").lower()
-        for m in models
-    ]
-    if any(target == n or n.startswith(f"{target}:") or target.startswith(f"{n}:") for n in names if n):
-        return True, f"Ollama ready ({model or LLM_MODEL})"
-    return False, f"Model '{model or LLM_MODEL}' not found in Ollama. Run: `ollama pull {model or LLM_MODEL}`"
+    names = [(m.get("model") or m.get("name") or "").lower() for m in models]
+    t = target.lower()
+    if any(t == n or n.startswith(f"{t}:") or t.startswith(f"{n}:") for n in names if n):
+        return True, f"Ollama ready ({target})"
+    return False, f"Model '{target}' not found in Ollama. Run: `ollama pull {target}`"
 
 
 def format_docs(docs: list[Document], max_chunks: int = TOP_K_FINAL, max_chunk_chars: int = MAX_CHUNK_CHARS) -> str:
@@ -147,14 +145,14 @@ def format_docs(docs: list[Document], max_chunks: int = TOP_K_FINAL, max_chunk_c
     return "\n\n".join(blocks)
 
 
+def _answer_pipeline(llm: Optional[BaseChatModel] = None) -> Runnable[dict, str]:
+    """Core LCEL generation runnable: {context, question} -> prompt -> LLM -> string."""
+    return get_prompt_template() | (llm or get_chat_model()) | StrOutputParser()
+
+
 def build_chain(retriever: Runnable[str, list[Document]], llm: Optional[BaseChatModel] = None) -> Runnable[str, str]:
-    """Build the LCEL RAG pipeline: retriever -> format_docs -> prompt -> LLM -> StrOutputParser."""
-    return (
-        {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()}
-        | get_prompt_template()
-        | (llm or get_chat_model())
-        | StrOutputParser()
-    )
+    """Build the full LCEL RAG pipeline: retriever -> format_docs -> prompt -> LLM -> StrOutputParser."""
+    return {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()} | _answer_pipeline(llm)
 
 
 def stream_answer(
@@ -166,9 +164,7 @@ def stream_answer(
     docs = retriever.invoke(question)[:TOP_K_FINAL]
     if not docs:
         return iter([f"{REFUSAL_MESSAGE} No relevant code chunks were retrieved."]), []
-
-    gen_chain = get_prompt_template() | (llm or get_chat_model()) | StrOutputParser()
-    return gen_chain.stream({"context": format_docs(docs), "question": question.strip()}), docs
+    return _answer_pipeline(llm).stream({"context": format_docs(docs), "question": question.strip()}), docs
 
 
 # ── Custom Citation Verification ─────────────────────────────────────────────

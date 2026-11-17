@@ -1,8 +1,7 @@
-"""LangChain indexer: loads, chunks, enriches, and embeds a repo into persistent Chroma with fingerprint caching."""
+"""LangChain indexer: loads, AST-chunks, enriches, and embeds a repo into Chroma with caching."""
 
 import hashlib
 import json
-import logging
 import subprocess
 import time
 from pathlib import Path
@@ -16,31 +15,27 @@ from src.config import DATA_DIR, EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL, get_coll
 from src.ingestion.chunker import chunk_file
 from src.ingestion.loader import load_files, repo_name_from_url
 
-logger = logging.getLogger(__name__)
-
 CHROMA_DIR = DATA_DIR / "chroma_db"
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
-_embeddings_instance: Optional[HuggingFaceEmbeddings] = None
+_embeddings: Optional[HuggingFaceEmbeddings] = None
 
 
 def get_embeddings() -> HuggingFaceEmbeddings:
     """Return the cached CPU HuggingFaceEmbeddings singleton (prefers local cache)."""
-    global _embeddings_instance
-    if _embeddings_instance is None:
-        try:
-            _embeddings_instance = HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL,
-                model_kwargs={"device": "cpu", "local_files_only": True},
-                encode_kwargs={"normalize_embeddings": True},
-            )
-        except Exception:
-            _embeddings_instance = HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL,
-                model_kwargs={"device": "cpu"},
-                encode_kwargs={"normalize_embeddings": True},
-            )
-    return _embeddings_instance
+    global _embeddings
+    if _embeddings is None:
+        for kwargs in ({"device": "cpu", "local_files_only": True}, {"device": "cpu"}):
+            try:
+                _embeddings = HuggingFaceEmbeddings(
+                    model_name=EMBEDDING_MODEL,
+                    model_kwargs=kwargs,
+                    encode_kwargs={"normalize_embeddings": True},
+                )
+                break
+            except Exception:
+                continue
+    return _embeddings  # type: ignore[return-value]
 
 
 def get_vector_store(repo_name: str) -> Chroma:
@@ -53,7 +48,7 @@ def get_vector_store(repo_name: str) -> Chroma:
 
 
 def add_metadata_header(doc: Document) -> Document:
-    """Prepend '# <type> <parent>.<symbol> | File: <path>' so embeddings, BM25, and reranker see structure."""
+    """Prepend '# <type> <parent>.<symbol> | File: <path>' so embeddings, BM25, and reranker see context."""
     m = doc.metadata
     file_path = str(m.get("file_path") or "").replace("\\", "/")
     symbol = str(m.get("symbol_name") or "")
@@ -79,9 +74,7 @@ def add_metadata_header(doc: Document) -> Document:
 def strip_metadata_header(text: str) -> str:
     """Remove the synthetic metadata header line before showing raw code in prompts or UI."""
     first, sep, rest = text.partition("\n")
-    if sep and first.startswith("# ") and "File: " in first:
-        return rest
-    return text
+    return rest if (sep and first.startswith("# ") and "File: " in first) else text
 
 
 def load_documents(repo_name: str) -> list[Document]:
@@ -90,7 +83,6 @@ def load_documents(repo_name: str) -> list[Document]:
         data = get_vector_store(repo_name).get(include=["documents", "metadatas"])
     except Exception:
         return []
-
     raw_docs = data.get("documents") or []
     raw_metas = data.get("metadatas") or [{} for _ in raw_docs]
     return [Document(page_content=text, metadata=meta or {}) for text, meta in zip(raw_docs, raw_metas)]
@@ -101,15 +93,17 @@ def get_meta_path(repo_name: str) -> Path:
     return DATA_DIR / f"{repo_name}_meta.json"
 
 
+def is_repo_indexed(repo_name: str) -> bool:
+    """Fast check for whether fingerprint metadata exists for this repo."""
+    return get_meta_path(repo_name).exists()
+
+
 def compute_repo_fingerprint(files: list[dict], repo_dir: Optional[Path] = None) -> str:
     """Compute a repo fingerprint from Git HEAD SHA, or MD5 of file paths, sizes, and mtimes."""
     if repo_dir and (repo_dir / ".git").exists():
         try:
             sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(repo_dir),
-                stderr=subprocess.DEVNULL,
-                text=True,
+                ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), stderr=subprocess.DEVNULL, text=True
             ).strip()
             if sha:
                 return f"git:{sha}"
@@ -124,30 +118,13 @@ def compute_repo_fingerprint(files: list[dict], repo_dir: Optional[Path] = None)
     return f"content:{hasher.hexdigest()}"
 
 
-def is_repo_indexed(repo_name: str) -> bool:
-    """Return True if metadata exists and Chroma holds at least one chunk for this repo."""
-    if not get_meta_path(repo_name).exists():
-        return False
-    try:
-        return get_vector_store(repo_name)._collection.count() > 0
-    except Exception:
-        return False
-
-
-def _cached_chunk_count(repo_name: str, fingerprint: str) -> Optional[int]:
-    """Return existing chunk count if repo fingerprint matches the cache, else None."""
+def _read_cached_meta(repo_name: str) -> dict:
+    """Read cached metadata JSON if present, else return an empty dict."""
     meta_path = get_meta_path(repo_name)
-    if not meta_path.exists():
-        return None
     try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("fingerprint") == fingerprint:
-            count = get_vector_store(repo_name)._collection.count()
-            if count > 0:
-                return count
+        return json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     except Exception:
-        pass
-    return None
+        return {}
 
 
 def index_repo(source: str, force_reindex: bool = False, force_reclone: bool = False) -> dict:
@@ -159,22 +136,20 @@ def index_repo(source: str, force_reindex: bool = False, force_reclone: bool = F
     repo_dir = Path(source) if Path(source).is_dir() else (DATA_DIR / repo_name)
     fingerprint = compute_repo_fingerprint(files, repo_dir=repo_dir)
 
-    if not force_reindex:
-        cached = _cached_chunk_count(repo_name, fingerprint)
-        if cached is not None:
-            return {
-                "repo_name": repo_name, "total_files": len(files), "total_chunks": cached,
-                "collection_name": col_name, "duration_seconds": round(time.time() - start_time, 2),
-                "skipped": True, "fingerprint": fingerprint,
-            }
+    def _summary(total_chunks: int, skipped: bool) -> dict:
+        return {
+            "repo_name": repo_name, "total_files": len(files), "total_chunks": total_chunks,
+            "collection_name": col_name, "duration_seconds": round(time.time() - start_time, 2),
+            "skipped": skipped, "fingerprint": fingerprint,
+        }
+
+    cached = _read_cached_meta(repo_name)
+    if not force_reindex and cached.get("fingerprint") == fingerprint and cached.get("total_chunks", 0) > 0:
+        return _summary(cached["total_chunks"], skipped=True)
 
     all_docs = [add_metadata_header(doc) for f in files for doc in chunk_file(f)]
     if not all_docs:
-        return {
-            "repo_name": repo_name, "total_files": len(files), "total_chunks": 0,
-            "collection_name": col_name, "duration_seconds": round(time.time() - start_time, 2),
-            "skipped": False, "fingerprint": fingerprint,
-        }
+        return _summary(0, skipped=False)
 
     vs = get_vector_store(repo_name)
     if force_reindex:
@@ -184,34 +159,24 @@ def index_repo(source: str, force_reindex: bool = False, force_reclone: bool = F
             pass
         vs = get_vector_store(repo_name)
 
-    # Embed in small batches to stay within 8 GB RAM
+    # Embed in small batches to stay within 8 GB RAM.
     for i in range(0, len(all_docs), EMBEDDING_BATCH_SIZE):
         vs.add_documents(all_docs[i : i + EMBEDDING_BATCH_SIZE])
 
-    meta_data = {
+    meta = {
         "repo_name": repo_name, "source": str(source), "fingerprint": fingerprint,
         "total_files": len(files), "total_chunks": len(all_docs), "collection_name": col_name,
         "indexed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "embedding_model": EMBEDDING_MODEL,
     }
-    try:
-        get_meta_path(repo_name).write_text(json.dumps(meta_data, indent=2), encoding="utf-8")
-    except Exception as exc:
-        logger.warning("Could not write metadata cache file: %s", exc)
-
-    return {
-        "repo_name": repo_name, "total_files": len(files), "total_chunks": len(all_docs),
-        "collection_name": col_name, "duration_seconds": round(time.time() - start_time, 2),
-        "skipped": False, "fingerprint": fingerprint,
-    }
+    get_meta_path(repo_name).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return _summary(len(all_docs), skipped=False)
 
 
 if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python -m src.ingestion.indexer <github_url_or_local_path> [--force]")
-        sys.exit(1)
-
+        sys.exit("Usage: python -m src.ingestion.indexer <github_url_or_local_path> [--force]")
     res = index_repo(sys.argv[1], force_reindex="--force" in sys.argv)
     status = "cached" if res["skipped"] else "indexed"
     print(f"{res['repo_name']}: {res['total_files']} files, {res['total_chunks']} chunks ({status} in {res['duration_seconds']}s)")
