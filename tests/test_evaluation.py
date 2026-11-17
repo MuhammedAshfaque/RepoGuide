@@ -85,6 +85,20 @@ class TestIsChunkRelevant:
         }
         assert is_chunk_relevant(chunk, "conduit/user/models.py", "User") is False
 
+    def test_langchain_document_match(self):
+        from langchain_core.documents import Document
+
+        doc = Document(
+            page_content="def login_user(): pass",
+            metadata={
+                "file_path": "conduit\\user\\views.py",
+                "symbol_name": "login_user",
+                "parent_class": "",
+            },
+        )
+        assert is_chunk_relevant(doc, "conduit/user/views.py", "login_user") is True
+        assert is_chunk_relevant(doc, "conduit/user/views.py", "other") is False
+
 
 class TestEvaluateQueryResults:
     """Tests for single query evaluation against ground truth."""

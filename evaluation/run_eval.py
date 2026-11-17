@@ -20,27 +20,27 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.retrieval.vector_search import vector_search
-from src.retrieval.keyword_search import bm25_search
-from src.retrieval.hybrid import hybrid_search
-from src.retrieval.reranker import hybrid_search_with_rerank
+from langchain_core.documents import Document
+
+from src.retrieval.retrieval import get_retriever
 
 
 # ── Ground Truth Evaluation Matching ─────────────────────────────────────────
 
-def is_chunk_relevant(item: dict[str, Any], expected_file: str, expected_symbol: str) -> bool:
+def is_chunk_relevant(item: Document | dict[str, Any], expected_file: str, expected_symbol: str) -> bool:
     """
-    Determine if a retrieved chunk matches the ground-truth target.
+    Determine if a retrieved Document or chunk dict matches the ground-truth target.
 
     Args:
-        item: Retrieved chunk dict containing 'file_path', 'symbol_name', 'parent_class'.
+        item: Retrieved LangChain Document or dict containing 'file_path', 'symbol_name', 'parent_class'.
         expected_file: Ground truth relative file path.
         expected_symbol: Ground truth function, class, or method name.
 
     Returns:
         True if the chunk corresponds to the ground truth target.
     """
-    ret_file = item.get("file_path", "").replace("\\", "/").lower()
+    meta = item.metadata if isinstance(item, Document) else item
+    ret_file = str(meta.get("file_path", "")).replace("\\", "/").lower()
     exp_file = expected_file.replace("\\", "/").lower()
 
     file_matches = ret_file == exp_file or ret_file.endswith(exp_file)
@@ -50,9 +50,9 @@ def is_chunk_relevant(item: dict[str, Any], expected_file: str, expected_symbol:
     if not expected_symbol:
         return True
 
-    ret_sym = (item.get("symbol_name") or "").lower()
+    ret_sym = str(meta.get("symbol_name") or "").lower()
     exp_sym = expected_symbol.lower()
-    ret_parent = (item.get("parent_class") or "").lower()
+    ret_parent = str(meta.get("parent_class") or "").lower()
 
     # Exact symbol name match, sub-name match, or enclosing class match
     symbol_matches = (
@@ -66,7 +66,7 @@ def is_chunk_relevant(item: dict[str, Any], expected_file: str, expected_symbol:
 
 
 def evaluate_query_results(
-    results: list[dict[str, Any]],
+    results: list[Document] | list[dict[str, Any]],
     expected_file: str,
     expected_symbol: str,
     k_cutoffs: list[int] = [1, 3, 5],
@@ -149,16 +149,26 @@ def run_evaluation(
     print(f" Modes:             {', '.join(modes)}")
     print(f"======================================================================")
 
+    # Build LangChain retrievers once
+    vec_retriever = get_retriever(repo_name, mode="vector", top_k=top_k)
+    bm25_retriever = get_retriever(repo_name, mode="bm25", top_k=top_k)
+    hyb_retriever = get_retriever(repo_name, mode="hybrid", top_k=top_k, top_k_retrieval=20)
+    rerank_retriever = (
+        get_retriever(repo_name, mode="hybrid_rerank", top_k=top_k, top_k_retrieval=20)
+        if include_reranker
+        else None
+    )
+
     # ── Warm-up Phase ────────────────────────────────────────────────────────
     # Run a warm-up query through each mode to load model weights and indexes into RAM.
     # This ensures timing measurements reflect steady-state retrieval latency,
     # rather than one-time cold-start model initialization.
     print("[eval] Warming up models and indexes...")
-    vector_search("warmup query", repo_name, top_k=top_k)
-    bm25_search("warmup query", repo_name, top_k=top_k)
-    hybrid_search("warmup query", repo_name, top_k_retrieval=20, top_k_final=top_k)
-    if include_reranker:
-        hybrid_search_with_rerank("warmup query", repo_name, top_k_retrieval=20, top_k_final=top_k)
+    vec_retriever.invoke("warmup query")
+    bm25_retriever.invoke("warmup query")
+    hyb_retriever.invoke("warmup query")
+    if rerank_retriever is not None:
+        rerank_retriever.invoke("warmup query")
     print("[eval] Warm-up complete. Starting benchmark runs...\n")
 
     for i, q in enumerate(questions, 1):
@@ -168,7 +178,7 @@ def run_evaluation(
 
         # 1. Vector Search
         t0 = time.perf_counter()
-        vec_results = vector_search(query, repo_name, top_k=top_k)
+        vec_results = vec_retriever.invoke(query)
         t_vec = time.perf_counter() - t0
         vec_eval = evaluate_query_results(vec_results, exp_file, exp_sym)
         per_mode_evals["vector_only"].append(vec_eval)
@@ -176,7 +186,7 @@ def run_evaluation(
 
         # 2. BM25 Search
         t0 = time.perf_counter()
-        bm_results = bm25_search(query, repo_name, top_k=top_k)
+        bm_results = bm25_retriever.invoke(query)
         t_bm = time.perf_counter() - t0
         bm_eval = evaluate_query_results(bm_results, exp_file, exp_sym)
         per_mode_evals["bm25_only"].append(bm_eval)
@@ -184,7 +194,7 @@ def run_evaluation(
 
         # 3. Hybrid Search
         t0 = time.perf_counter()
-        hyb_results = hybrid_search(query, repo_name, top_k_retrieval=20, top_k_final=top_k)
+        hyb_results = hyb_retriever.invoke(query)
         t_hyb = time.perf_counter() - t0
         hyb_eval = evaluate_query_results(hyb_results, exp_file, exp_sym)
         per_mode_evals["hybrid"].append(hyb_eval)
@@ -198,11 +208,9 @@ def run_evaluation(
         )
 
         # 4. Hybrid + Rerank (optional)
-        if include_reranker:
+        if rerank_retriever is not None:
             t0 = time.perf_counter()
-            rerank_results = hybrid_search_with_rerank(
-                query, repo_name, top_k_retrieval=20, top_k_final=top_k
-            )
+            rerank_results = rerank_retriever.invoke(query)
             t_rr = time.perf_counter() - t0
             rr_eval = evaluate_query_results(rerank_results, exp_file, exp_sym)
             per_mode_evals["hybrid_rerank"].append(rr_eval)
@@ -258,25 +266,31 @@ def generate_markdown_report(report_data: dict[str, Any], output_path: Path) -> 
         header_cols += " Hybrid + Rerank |"
         sep_cols += ":---:|"
 
-    def make_row(metric_name: str, key: str, is_pct: bool = True, bold_best: bool = True) -> str:
-        v = overall["vector_only"][key]
-        b = overall["bm25_only"][key]
-        h = overall["hybrid"][key]
+    def make_row(metric_name: str, key: str, is_pct: bool = True) -> str:
+        mode_keys = ["vector_only", "bm25_only", "hybrid"] + (["hybrid_rerank"] if has_rerank else [])
+        vals = [overall[m][key] for m in mode_keys]
+        best = max(vals)
         suffix = "%" if is_pct else ""
-        fmt = f"{v:.4f}" if not is_pct else f"{v}{suffix}"
-        fmt_b = f"{b:.4f}" if not is_pct else f"{b}{suffix}"
-        fmt_h = f"{h:.4f}" if not is_pct else f"{h}{suffix}"
 
-        row = f"| **{metric_name}** | {fmt} | {fmt_b} | **{fmt_h}** |"
-        if has_rerank:
-            r = overall["hybrid_rerank"][key]
-            fmt_r = f"{r:.4f}" if not is_pct else f"{r}{suffix}"
-            # Check if rerank is best or tied
-            if r >= h:
-                row += f" **{fmt_r}** |"
-            else:
-                row += f" {fmt_r} |"
-        return row
+        cells = []
+        for v in vals:
+            text = f"{v}{suffix}" if is_pct else f"{v:.4f}"
+            cells.append(f"**{text}**" if v == best else text)
+
+        return f"| **{metric_name}** | " + " | ".join(cells) + " |"
+
+    def make_breakdown_row(section: dict[str, Any], metric_name: str, key: str, is_pct: bool = True) -> str:
+        mode_keys = ["vector_only", "bm25_only", "hybrid"] + (["hybrid_rerank"] if has_rerank else [])
+        vals = [section.get(m, {}).get(key, 0) for m in mode_keys]
+        best = max(vals)
+        suffix = "%" if is_pct else ""
+
+        cells = []
+        for v in vals:
+            text = f"{v}{suffix}" if is_pct else f"{v:.4f}"
+            cells.append(f"**{text}**" if v == best else text)
+
+        return f"| **{metric_name}** | " + " | ".join(cells) + " |"
 
     row_hit1 = make_row("Hit@1", "hit@1")
     row_hit3 = make_row("Hit@3", "hit@3")
@@ -288,50 +302,32 @@ def generate_markdown_report(report_data: dict[str, Any], output_path: Path) -> 
 
     # Category breakdown rows
     conc = breakdown.get("Conceptual / Natural Language", {})
-    conc_v5 = conc.get("vector_only", {}).get("hit@5", 0)
-    conc_b5 = conc.get("bm25_only", {}).get("hit@5", 0)
-    conc_h5 = conc.get("hybrid", {}).get("hit@5", 0)
-    conc_vm = conc.get("vector_only", {}).get("mrr", 0)
-    conc_bm = conc.get("bm25_only", {}).get("mrr", 0)
-    conc_hm = conc.get("hybrid", {}).get("mrr", 0)
-
-    conc_hit5_row = f"| **Hit@5** | {conc_v5}% | {conc_b5}% | **{conc_h5}%** |"
-    conc_mrr_row = f"| **MRR** | {conc_vm:.4f} | {conc_bm:.4f} | **{conc_hm:.4f}** |"
-    if has_rerank:
-        conc_r5 = conc.get("hybrid_rerank", {}).get("hit@5", 0)
-        conc_rm = conc.get("hybrid_rerank", {}).get("mrr", 0)
-        conc_hit5_row += f" {conc_r5}% |"
-        conc_mrr_row += f" {conc_rm:.4f} |"
+    conc_hit5_row = make_breakdown_row(conc, "Hit@5", "hit@5", is_pct=True)
+    conc_mrr_row = make_breakdown_row(conc, "MRR", "mrr", is_pct=False)
 
     sym = breakdown.get("Exact Symbol / Identifier", {})
-    sym_v5 = sym.get("vector_only", {}).get("hit@5", 0)
-    sym_b5 = sym.get("bm25_only", {}).get("hit@5", 0)
-    sym_h5 = sym.get("hybrid", {}).get("hit@5", 0)
-    sym_vm = sym.get("vector_only", {}).get("mrr", 0)
-    sym_bm = sym.get("bm25_only", {}).get("mrr", 0)
-    sym_hm = sym.get("hybrid", {}).get("mrr", 0)
-
-    sym_hit5_row = f"| **Hit@5** | {sym_v5}% | {sym_b5}% | **{sym_h5}%** |"
-    sym_mrr_row = f"| **MRR** | {sym_vm:.4f} | {sym_bm:.4f} | **{sym_hm:.4f}** |"
-    if has_rerank:
-        sym_r5 = sym.get("hybrid_rerank", {}).get("hit@5", 0)
-        sym_rm = sym.get("hybrid_rerank", {}).get("mrr", 0)
-        sym_hit5_row += f" {sym_r5}% |"
-        sym_mrr_row += f" {sym_rm:.4f} |"
+    sym_hit5_row = make_breakdown_row(sym, "Hit@5", "hit@5", is_pct=True)
+    sym_mrr_row = make_breakdown_row(sym, "MRR", "mrr", is_pct=False)
 
     configs = "Vector-Only, BM25-Only, Hybrid (RRF)"
     if has_rerank:
         configs += ", Hybrid + Cross-Encoder Rerank"
 
-    rerank_bullets = ""
+    v_h5, b_h5, h_h5 = overall["vector_only"]["hit@5"], overall["bm25_only"]["hit@5"], overall["hybrid"]["hit@5"]
+    v_h1, h_h1 = overall["vector_only"]["hit@1"], overall["hybrid"]["hit@1"]
+    v_mrr, h_mrr = overall["vector_only"]["mrr"], overall["hybrid"]["mrr"]
+
+    hit5_cmp = "higher than" if h_h5 > v_h5 else ("equal to" if h_h5 == v_h5 else "lower than")
+    mrr_cmp = "higher than" if h_mrr > v_mrr else ("equal to" if h_mrr == v_mrr else "lower than")
+
     if has_rerank:
         r_hit1 = overall["hybrid_rerank"]["hit@1"]
         r_hit5 = overall["hybrid_rerank"]["hit@5"]
         r_mrr = overall["hybrid_rerank"]["mrr"]
         r_lat = overall["hybrid_rerank"]["latency_ms"]
         rerank_bullets = f"""2. **Reranker Trade-offs:**
-   - **Ranking Precision:** Hybrid + Rerank achieved the highest MRR (**{r_mrr:.4f}**) and the highest Hit@1 (**{r_hit1}%**), successfully placing target snippets at Rank 1 in most queries.
-   - **Latency:** It also had the highest latency (**{r_lat} ms** vs. {overall['hybrid']['latency_ms']} ms for Hybrid and {overall['vector_only']['latency_ms']} ms for Vector)."""
+   - **Ranking Precision & Recall:** Hybrid + Rerank achieved Hit@1 of **{r_hit1}%**, Hit@5 of **{r_hit5}%**, and MRR of **{r_mrr:.4f}** (compared to Hybrid RRF at {h_h1}% Hit@1, {h_h5}% Hit@5, and {h_mrr:.4f} MRR).
+   - **Latency:** Hybrid + Rerank had the highest average latency (**{r_lat} ms** vs. {overall['hybrid']['latency_ms']} ms for Hybrid, {overall['vector_only']['latency_ms']} ms for Vector, and {overall['bm25_only']['latency_ms']} ms for BM25)."""
     else:
         rerank_bullets = "2. **Reranker:** Not evaluated in this run."
 
@@ -377,9 +373,9 @@ def generate_markdown_report(report_data: dict[str, Any], output_path: Path) -> 
 
 ## 3. Analysis & Observations
 
-1. **Hybrid vs. Vector Only:**
-   - **Hit@5:** Hybrid retrieval achieved a higher Hit@5 (**{overall['hybrid']['hit@5']}%**) than Vector Only ({overall['vector_only']['hit@5']}%) and BM25 Only ({overall['bm25_only']['hit@5']}%). Combining dense and sparse retrieval helped surface target files that vector search missed (such as configuration classes).
-   - **Hit@1 and MRR:** However, Vector Only had a higher Hit@1 ({overall['vector_only']['hit@1']}% vs. {overall['hybrid']['hit@1']}%) and higher MRR ({overall['vector_only']['mrr']:.4f} vs. {overall['hybrid']['mrr']:.4f}) than Hybrid. Reciprocal Rank Fusion frequently placed the correct chunk within the top 3 to 5 results, but vector search placed it directly at Rank 1 more often when it matched.
+1. **Hybrid (RRF) vs. Vector Only and BM25 Only:**
+   - **Hit@5:** Hybrid (RRF) reached **{h_h5}%**, which is {hit5_cmp} Vector Only ({v_h5}%) and higher than BM25 Only ({b_h5}%).
+   - **Hit@1 and MRR:** Hybrid (RRF) reached {h_h1}% Hit@1 and {h_mrr:.4f} MRR, which is {mrr_cmp} Vector Only ({v_h1}% Hit@1, {v_mrr:.4f} MRR).
 
 {rerank_bullets}
 
