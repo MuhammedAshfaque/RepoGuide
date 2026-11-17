@@ -14,7 +14,7 @@
 | **Hit@3** | 87.5% | 62.5% | 78.1% | **90.6%** |
 | **Hit@5** | 90.6% | 68.8% | 93.8% | **96.9%** |
 | **MRR (Mean Reciprocal Rank)** | 0.7526 | 0.5052 | 0.6505 | **0.8510** |
-| **Average Latency (ms)** | 31.6 ms | 1.3 ms | 31.5 ms | 2591.0 ms |
+| **Average Latency (ms)** | 46.5 ms | 2.1 ms | 56.8 ms | 3693.1 ms |
 
 ---
 
@@ -44,7 +44,7 @@
 
 2. **Reranker Trade-offs:**
    - **Ranking Precision & Recall:** Hybrid + Rerank achieved Hit@1 of **78.1%**, Hit@5 of **96.9%**, and MRR of **0.8510** (vs. Hybrid RRF at 46.9% Hit@1, 93.8% Hit@5, and 0.6505 MRR).
-   - **Latency:** Hybrid + Rerank had the highest average latency (**2591.0 ms** vs. 31.5 ms for Hybrid, 31.6 ms for Vector, and 1.3 ms for BM25).
+   - **Latency:** Hybrid + Rerank had the highest average latency (**3693.1 ms** vs. 56.8 ms for Hybrid, 46.5 ms for Vector, and 2.1 ms for BM25).
 
 3. **Scope and Dataset Limits:**
    - These findings are based on a small evaluation set of 32 questions on a single repository (`flask-realworld-example-app`). Results on larger repositories or other programming languages may differ.
