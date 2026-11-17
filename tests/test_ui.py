@@ -1,16 +1,16 @@
 """
-Unit tests for the Streamlit UI helper functions (Phase 6).
+Unit tests for the Streamlit UI helper functions (app.py).
 
 Covers:
   - Repository name resolution from URLs and local paths
-  - Index presence checking
-  - Retrieval mode routing
+  - Index presence checking (pickle docs file)
+  - Retrieval mode routing to LangChain get_retriever()
 """
 
-from pathlib import Path
-import pytest
+from langchain_core.documents import Document
+from langchain_core.runnables import RunnableLambda
 
-from app import resolve_repo_name, check_repo_indexed, retrieve_by_mode
+from app import check_repo_indexed, resolve_repo_name, retrieve_by_mode
 
 
 class TestUIHelpers:
@@ -25,43 +25,32 @@ class TestUIHelpers:
         assert resolve_repo_name("my_codebase") == "my_codebase"
 
     def test_check_repo_indexed_for_existing_demo(self):
-        # Demo repo was indexed in earlier phases
         assert check_repo_indexed("flask-realworld-example-app") is True
 
     def test_check_repo_indexed_for_nonexistent(self):
         assert check_repo_indexed("nonexistent_repo_xyz_123") is False
 
-    def test_retrieve_by_mode_routes_to_correct_engine(self, monkeypatch):
-        called = {}
+    def test_retrieve_by_mode_routes_all_modes(self, monkeypatch):
+        calls = []
 
-        def mock_hybrid(q, r, top_k_retrieval=20, top_k_final=4):
-            called["hybrid"] = (q, r, top_k_final)
-            return [{"mode": "hybrid"}]
+        def mock_get_retriever(repo_name, mode="hybrid", top_k=4):
+            calls.append((repo_name, mode, top_k))
+            return RunnableLambda(lambda q: [Document(page_content=q, metadata={"mode": mode})])
 
-        def mock_vector(q, r, top_k=4):
-            called["vector"] = (q, r, top_k)
-            return [{"mode": "vector"}]
+        monkeypatch.setattr("app.get_retriever", mock_get_retriever)
 
-        def mock_bm25(q, r, top_k=4):
-            called["bm25"] = (q, r, top_k)
-            return [{"mode": "bm25"}]
-
-        monkeypatch.setattr("app.hybrid_search", mock_hybrid)
-        monkeypatch.setattr("app.vector_search", mock_vector)
-        monkeypatch.setattr("app.bm25_search", mock_bm25)
-
-        # 1. Hybrid route
         res_h = retrieve_by_mode("auth", "demo", "Hybrid (Vector + BM25 via RRF)", top_k=3)
-        assert res_h[0]["mode"] == "hybrid"
-        assert called["hybrid"] == ("auth", "demo", 3)
+        res_r = retrieve_by_mode("auth", "demo", "Hybrid + Rerank", top_k=4)
+        res_v = retrieve_by_mode("auth", "demo", "Vector Only", top_k=2)
+        res_b = retrieve_by_mode("auth", "demo", "BM25 Only", top_k=1)
 
-        # 2. Vector route
-        res_v = retrieve_by_mode("auth", "demo", "Vector Only", top_k=5)
-        assert res_v[0]["mode"] == "vector"
-        assert called["vector"] == ("auth", "demo", 5)
-
-        # 3. BM25 route
-        res_b = retrieve_by_mode("auth", "demo", "BM25 Only", top_k=2)
-        assert res_b[0]["mode"] == "bm25"
-        assert called["bm25"] == ("auth", "demo", 2)
-
+        assert res_h[0].metadata["mode"] == "hybrid"
+        assert res_r[0].metadata["mode"] == "hybrid_rerank"
+        assert res_v[0].metadata["mode"] == "vector"
+        assert res_b[0].metadata["mode"] == "bm25"
+        assert calls == [
+            ("demo", "hybrid", 3),
+            ("demo", "hybrid_rerank", 4),
+            ("demo", "vector", 2),
+            ("demo", "bm25", 1),
+        ]
