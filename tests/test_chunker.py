@@ -19,6 +19,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from langchain_core.documents import Document
 
 from src.ingestion.chunker import (
     Chunk,
@@ -70,6 +71,16 @@ class TestBasicFunction:
         chunks = chunk_python_file(self.SOURCE, "src/app.py")
         func = [c for c in chunks if c.chunk_type == "function"][0]
         assert func.file_path == "src/app.py"
+
+    def test_is_langchain_document(self):
+        chunks = chunk_python_file(self.SOURCE, "src/app.py")
+        func = [c for c in chunks if c.chunk_type == "function"][0]
+        assert isinstance(func, Document)
+        assert func.page_content.startswith("def greet")
+        assert func.metadata["file_path"] == "src/app.py"
+        assert func.metadata["symbol_name"] == "greet"
+        assert func.metadata["start_line"] == 1
+        assert func.metadata["end_line"] == 2
 
 
 class TestMultipleFunctions:

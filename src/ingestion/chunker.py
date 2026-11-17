@@ -24,47 +24,95 @@ Why AST chunking?
 
 import ast
 import textwrap
-from dataclasses import dataclass, field
 from pathlib import Path
+from langchain_core.documents import Document
 
 
-# ── Chunk data structure ─────────────────────────────────────────────────────
+# ── Chunk data structure (LangChain Document) ────────────────────────────────
 
-@dataclass
-class Chunk:
+class Chunk(Document):
     """
-    One chunk of source code with its metadata.
+    A LangChain Document representing a code chunk with code-aware metadata.
 
-    Attributes:
-        content:      The raw source code text of the chunk.
-        file_path:    Path relative to the repo root (for citations).
-        start_line:   First line number (1-based).
-        end_line:     Last line number (1-based, inclusive).
-        symbol_name:  Name of the function/class/method, or "module" for
-                      top-level code, or "" for fallback chunks.
-        chunk_type:   One of: "function", "async_function", "class", "method",
-                      "async_method", "module", "block" (fallback).
-        language:     Programming language (e.g. "python", "javascript").
-        parent_class: For methods, the name of the enclosing class. Empty string
-                      for everything else.
-        decorators:   List of decorator names (e.g. ["staticmethod", "app.route"]).
-        has_docstring: Whether this chunk has a docstring.
+    Inherits from `langchain_core.documents.Document`:
+      - page_content: The raw source code text of the chunk.
+      - metadata: file_path, start_line, end_line, symbol_name, chunk_type,
+                  language, parent_class, decorators, has_docstring.
     """
-    content: str
-    file_path: str
-    start_line: int
-    end_line: int
-    symbol_name: str
-    chunk_type: str
-    language: str
-    parent_class: str = ""
-    decorators: list[str] = field(default_factory=list)
-    has_docstring: bool = False
+
+    def __init__(
+        self,
+        content: str,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        symbol_name: str,
+        chunk_type: str,
+        language: str,
+        parent_class: str = "",
+        decorators: list[str] | None = None,
+        has_docstring: bool = False,
+        **kwargs,
+    ):
+        meta = {
+            "file_path": file_path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "symbol_name": symbol_name,
+            "chunk_type": chunk_type,
+            "language": language,
+            "parent_class": parent_class,
+            "decorators": decorators or [],
+            "has_docstring": has_docstring,
+        }
+        meta.update(kwargs.get("metadata", {}))
+        super().__init__(page_content=content, metadata=meta)
+
+    @property
+    def content(self) -> str:
+        """Alias for page_content for backward compatibility."""
+        return self.page_content
+
+    @property
+    def file_path(self) -> str:
+        return self.metadata["file_path"]
+
+    @property
+    def start_line(self) -> int:
+        return self.metadata["start_line"]
+
+    @property
+    def end_line(self) -> int:
+        return self.metadata["end_line"]
+
+    @property
+    def symbol_name(self) -> str:
+        return self.metadata["symbol_name"]
+
+    @property
+    def chunk_type(self) -> str:
+        return self.metadata["chunk_type"]
+
+    @property
+    def language(self) -> str:
+        return self.metadata["language"]
+
+    @property
+    def parent_class(self) -> str:
+        return self.metadata.get("parent_class", "")
+
+    @property
+    def decorators(self) -> list[str]:
+        return self.metadata.get("decorators", [])
+
+    @property
+    def has_docstring(self) -> bool:
+        return self.metadata.get("has_docstring", False)
 
     def to_dict(self) -> dict:
-        """Convert to a plain dict (useful for serialization / ChromaDB metadata)."""
+        """Convert to a plain dict (useful for serialization / metadata inspection)."""
         return {
-            "content": self.content,
+            "content": self.page_content,
             "file_path": self.file_path,
             "start_line": self.start_line,
             "end_line": self.end_line,
@@ -72,7 +120,7 @@ class Chunk:
             "chunk_type": self.chunk_type,
             "language": self.language,
             "parent_class": self.parent_class,
-            "decorators": ", ".join(self.decorators),
+            "decorators": ", ".join(self.decorators) if isinstance(self.decorators, list) else str(self.decorators),
             "has_docstring": self.has_docstring,
         }
 
