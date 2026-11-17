@@ -1,4 +1,4 @@
-"""LCEL generation chain, chat model factory (Ollama/Gemini), and citation verification."""
+"""LCEL generation chain (ChatOllama / Gemini), strict citation prompt, and regex citation audit."""
 
 import re
 from dataclasses import dataclass
@@ -26,7 +26,7 @@ from src.ingestion.indexer import strip_metadata_header
 MAX_CHUNK_CHARS = 2500
 REFUSAL_MESSAGE = "I couldn't find this in the codebase."
 
-# Literal braces inside code examples are escaped as {{ }} for ChatPromptTemplate.
+# Literal braces inside few-shot code examples are escaped as {{ }} for ChatPromptTemplate.
 SYSTEM_PROMPT = """You are CodeCompass, a precise codebase onboarding assistant.
 Your job is to answer the user's question about a codebase using ONLY the provided code snippets.
 
@@ -73,11 +73,9 @@ HUMAN_TEMPLATE = "Question: {question}\n\nRetrieved Code Snippets:\n{context}\n\
 
 
 def get_prompt_template() -> ChatPromptTemplate:
-    """Return the grounding ChatPromptTemplate with few-shot citation examples."""
+    """Return the grounded ChatPromptTemplate with few-shot citation examples."""
     return ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT), ("human", HUMAN_TEMPLATE)])
 
-
-# ── Chat Model Factory & Health Check ────────────────────────────────────────
 
 def get_chat_model(provider: Optional[str] = None, model: Optional[str] = None) -> BaseChatModel:
     """Instantiate ChatOllama (default) or ChatGoogleGenerativeAI based on LLM_PROVIDER."""
@@ -102,7 +100,7 @@ def get_chat_model(provider: Optional[str] = None, model: Optional[str] = None) 
 
 
 def check_llm_health(provider: Optional[str] = None, model: Optional[str] = None) -> tuple[bool, str]:
-    """Check whether the selected LLM backend is reachable and configured."""
+    """Return (is_healthy, message) for the selected LLM provider."""
     chosen = (provider or LLM_PROVIDER).lower().strip()
     if chosen == "gemini":
         if not GEMINI_API_KEY.strip():
@@ -112,32 +110,25 @@ def check_llm_health(provider: Optional[str] = None, model: Optional[str] = None
     if chosen != "ollama":
         return False, f"Unsupported LLM provider: '{chosen}'"
 
-    target = model or LLM_MODEL
+    target = (model or LLM_MODEL).lower()
     try:
         import ollama
         resp = ollama.Client(host=OLLAMA_BASE_URL).list()
+        models = getattr(resp, "models", None) or (resp.get("models", []) if isinstance(resp, dict) else [])
     except Exception as exc:
-        return False, f"Cannot connect to Ollama at {OLLAMA_BASE_URL}: {exc}"
+        return False, f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. ({exc})"
 
-    raw_models = getattr(resp, "models", None) or (resp.get("models", []) if isinstance(resp, dict) else [])
-    available = [
-        (getattr(m, "model", None) or getattr(m, "name", None) or (m.get("model") if isinstance(m, dict) else "")).lower()
-        for m in raw_models
+    names = [
+        (getattr(m, "model", None) or getattr(m, "name", None) or (m.get("model") if isinstance(m, dict) else "") or "").lower()
+        for m in models
     ]
-    t = target.lower()
-    if not any(t == a or a.startswith(f"{t}:") or t.startswith(f"{a}:") for a in available if a):
-        return False, f"Model '{target}' is not pulled in Ollama. Run: `ollama pull {target}`"
-    return True, f"Ollama ready ({target})"
+    if any(target == n or n.startswith(f"{target}:") or target.startswith(f"{n}:") for n in names if n):
+        return True, f"Ollama ready ({model or LLM_MODEL})"
+    return False, f"Model '{model or LLM_MODEL}' not found in Ollama. Run: `ollama pull {model or LLM_MODEL}`"
 
 
-# ── Context Formatting & LCEL Chain ──────────────────────────────────────────
-
-def format_docs(
-    docs: list[Document],
-    max_chunks: int = TOP_K_FINAL,
-    max_chunk_chars: int = MAX_CHUNK_CHARS,
-) -> str:
-    """Format up to 4 Documents into labeled code snippets within the 4096-token budget."""
+def format_docs(docs: list[Document], max_chunks: int = TOP_K_FINAL, max_chunk_chars: int = MAX_CHUNK_CHARS) -> str:
+    """Format up to max_chunks Documents into labeled code blocks within the context budget."""
     if not docs:
         return "(No relevant code snippets found.)"
 
@@ -146,8 +137,7 @@ def format_docs(
         m = doc.metadata
         parent = f" in {m['parent_class']}" if m.get("parent_class") else ""
         header = (
-            f"--- Snippet [{idx}]: {m.get('file_path', 'unknown')}:"
-            f"{m.get('start_line', 0)}-{m.get('end_line', 0)} "
+            f"--- Snippet [{idx}]: {m.get('file_path', 'unknown')}:{m.get('start_line', 0)}-{m.get('end_line', 0)} "
             f"({m.get('chunk_type') or 'code'}: {m.get('symbol_name') or '(block)'}{parent}) ---"
         )
         content = strip_metadata_header(doc.page_content).strip()
@@ -157,10 +147,7 @@ def format_docs(
     return "\n\n".join(blocks)
 
 
-def build_chain(
-    retriever: Runnable[str, list[Document]],
-    llm: Optional[BaseChatModel] = None,
-) -> Runnable[str, str]:
+def build_chain(retriever: Runnable[str, list[Document]], llm: Optional[BaseChatModel] = None) -> Runnable[str, str]:
     """Build the LCEL RAG pipeline: retriever -> format_docs -> prompt -> LLM -> StrOutputParser."""
     return (
         {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()}
@@ -175,17 +162,16 @@ def stream_answer(
     retriever: Runnable[str, list[Document]],
     llm: Optional[BaseChatModel] = None,
 ) -> tuple[Iterator[str], list[Document]]:
-    """Retrieve once and stream the LCEL response alongside the retrieved Documents."""
+    """Retrieve documents once and stream the LCEL response alongside the retrieved Documents."""
     docs = retriever.invoke(question)[:TOP_K_FINAL]
     if not docs:
         return iter([f"{REFUSAL_MESSAGE} No relevant code chunks were retrieved."]), []
 
     gen_chain = get_prompt_template() | (llm or get_chat_model()) | StrOutputParser()
-    stream = gen_chain.stream({"context": format_docs(docs), "question": question.strip()})
-    return stream, docs
+    return gen_chain.stream({"context": format_docs(docs), "question": question.strip()}), docs
 
 
-# ── Citation Extraction & Verification ───────────────────────────────────────
+# ── Custom Citation Verification ─────────────────────────────────────────────
 
 _CITATION_REGEX = re.compile(r"`?([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+):(\d+)(?:-(\d+))?`?")
 
@@ -205,14 +191,14 @@ def extract_citations(text: str) -> list[ParsedCitation]:
             raw=m.group(0).strip("`"),
             file_path=m.group(1).replace("\\", "/").strip(),
             start_line=int(m.group(2)),
-            end_line=int(m.group(3)) if m.group(3) else int(m.group(2)),
+            end_line=int(m.group(3) or m.group(2)),
         )
         for m in _CITATION_REGEX.finditer(text)
     ]
 
 
 def verify_citation(citation: ParsedCitation, retrieved_docs: list[Document]) -> bool:
-    """Return True if the cited file and line range overlap a retrieved Document (+/-5 line margin)."""
+    """Return True if a citation matches a retrieved Document's file and line range (+/- 5 lines)."""
     cite_path = citation.file_path.lower().replace("\\", "/")
     for doc in retrieved_docs:
         m = doc.metadata
@@ -225,8 +211,9 @@ def verify_citation(citation: ParsedCitation, retrieved_docs: list[Document]) ->
 
 
 def verify_all_citations(text: str, retrieved_docs: list[Document]) -> tuple[list[str], list[str]]:
-    """Split all extracted citations into unique (valid, hallucinated) lists."""
-    valid, hallucinated = [], []
+    """Split extracted citations into (valid_citations, hallucinated_citations)."""
+    valid: list[str] = []
+    hallucinated: list[str] = []
     for cite in extract_citations(text):
         bucket = valid if verify_citation(cite, retrieved_docs) else hallucinated
         if cite.raw not in bucket:
