@@ -108,9 +108,10 @@ with st.sidebar:
                 st.error(f"Indexing error: {exc}")
 
     st.divider()
-    st.subheader("🔍 Retrieval Settings")
-    search_mode = st.radio("Search Engine Mode:", list(MODE_MAP.keys()), index=0)
-    top_k_chunks = st.slider("Chunks fed to LLM:", min_value=1, max_value=TOP_K_FINAL, value=TOP_K_FINAL)
+    with st.expander("⚙️ Additional Settings", expanded=False):
+        st.markdown("**🔍 Retrieval Settings**")
+        search_mode = st.radio("Search Engine Mode:", list(MODE_MAP.keys()), index=0)
+        top_k_chunks = st.slider("Chunks fed to LLM:", min_value=1, max_value=TOP_K_FINAL, value=TOP_K_FINAL)
 
     st.divider()
     if st.button("🗑️ Clear Chat History", use_container_width=True):
