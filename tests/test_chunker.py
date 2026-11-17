@@ -1,8 +1,7 @@
-"""Tests for the AST and fallback chunker (src/ingestion/chunker.py)."""
+"""Tests for the code-aware chunker (src/ingestion/chunker.py)."""
 
 import textwrap
 from pathlib import Path
-
 import pytest
 from langchain_core.documents import Document
 
@@ -20,18 +19,19 @@ class TestBasicFunction:
             return f"Hello, {name}!"
     """)
 
-    def test_extracts_one_function_as_document(self):
-        docs = chunk_python_file(self.SOURCE, "src/app.py")
-        funcs = [d for d in docs if d.metadata["chunk_type"] == "function"]
-        assert len(funcs) == 1
-        fn = funcs[0]
-        assert isinstance(fn, Document)
-        assert fn.page_content.startswith("def greet")
-        assert fn.metadata["symbol_name"] == "greet"
-        assert fn.metadata["start_line"] == 1
-        assert fn.metadata["end_line"] == 2
-        assert fn.metadata["language"] == "python"
-        assert fn.metadata["file_path"] == "src/app.py"
+    def test_extracts_one_function(self):
+        docs = [d for d in chunk_python_file(self.SOURCE, "app.py") if d.metadata["chunk_type"] == "function"]
+        assert len(docs) == 1
+
+    def test_function_metadata_and_document_type(self):
+        func = [d for d in chunk_python_file(self.SOURCE, "src/app.py") if d.metadata["chunk_type"] == "function"][0]
+        assert isinstance(func, Document)
+        assert func.page_content.startswith("def greet")
+        assert func.metadata["symbol_name"] == "greet"
+        assert func.metadata["start_line"] == 1
+        assert func.metadata["end_line"] == 2
+        assert func.metadata["language"] == "python"
+        assert func.metadata["file_path"] == "src/app.py"
 
 
 class TestMultipleFunctions:
@@ -46,11 +46,10 @@ class TestMultipleFunctions:
             return a * b
     """)
 
-    def test_extracts_all_functions(self):
-        docs = chunk_python_file(self.SOURCE, "math_ops.py")
-        funcs = [d for d in docs if d.metadata["chunk_type"] == "function"]
+    def test_extracts_three_functions(self):
+        funcs = [d for d in chunk_python_file(self.SOURCE, "math_ops.py") if d.metadata["chunk_type"] == "function"]
         assert len(funcs) == 3
-        assert {d.metadata["symbol_name"] for d in funcs} == {"add", "subtract", "multiply"}
+        assert {f.metadata["symbol_name"] for f in funcs} == {"add", "subtract", "multiply"}
 
 
 class TestClassWithMethods:
@@ -65,16 +64,14 @@ class TestClassWithMethods:
                 return a - b
     """)
 
-    def test_extracts_class_signature_and_methods(self):
-        docs = chunk_python_file(self.SOURCE, "calc.py")
-        classes = [d for d in docs if d.metadata["chunk_type"] == "class"]
-        methods = [d for d in docs if d.metadata["chunk_type"] == "method"]
-
+    def test_extracts_class_signature_and_docstring(self):
+        classes = [d for d in chunk_python_file(self.SOURCE, "calc.py") if d.metadata["chunk_type"] == "class"]
         assert len(classes) == 1
         assert classes[0].metadata["symbol_name"] == "Calculator"
         assert classes[0].metadata["has_docstring"] is True
 
-        assert len(methods) == 2
+    def test_extracts_methods_with_parent_class(self):
+        methods = [d for d in chunk_python_file(self.SOURCE, "calc.py") if d.metadata["chunk_type"] == "method"]
         assert {m.metadata["symbol_name"] for m in methods} == {"add", "subtract"}
         assert all(m.metadata["parent_class"] == "Calculator" for m in methods)
 
@@ -88,8 +85,7 @@ class TestClassWithoutMethods:
     """)
 
     def test_extracts_whole_class(self):
-        docs = chunk_python_file(self.SOURCE, "config.py")
-        classes = [d for d in docs if d.metadata["chunk_type"] == "class"]
+        classes = [d for d in chunk_python_file(self.SOURCE, "config.py") if d.metadata["chunk_type"] == "class"]
         assert len(classes) == 1
         assert classes[0].metadata["symbol_name"] == "Config"
         assert "DEBUG" in classes[0].page_content
@@ -110,13 +106,11 @@ class TestAsyncFunctions:
 
     def test_async_function_and_method_types(self):
         docs = chunk_python_file(self.SOURCE, "client.py")
-        afuncs = [d for d in docs if d.metadata["chunk_type"] == "async_function"]
-        amethods = [d for d in docs if d.metadata["chunk_type"] == "async_method"]
-
-        assert len(afuncs) == 1 and afuncs[0].metadata["symbol_name"] == "fetch_data"
-        assert len(amethods) == 1
-        assert amethods[0].metadata["symbol_name"] == "get"
-        assert amethods[0].metadata["parent_class"] == "Client"
+        async_funcs = [d for d in docs if d.metadata["chunk_type"] == "async_function"]
+        async_methods = [d for d in docs if d.metadata["chunk_type"] == "async_method"]
+        assert len(async_funcs) == 1 and async_funcs[0].metadata["symbol_name"] == "fetch_data"
+        assert len(async_methods) == 1 and async_methods[0].metadata["symbol_name"] == "get"
+        assert async_methods[0].metadata["parent_class"] == "Client"
 
 
 class TestDecorators:
@@ -133,11 +127,10 @@ class TestDecorators:
             pass
     """)
 
-    def test_decorators_captured_and_included(self):
+    def test_decorators_captured_and_start_line(self):
         docs = chunk_python_file(self.SOURCE, "views.py")
         index_fn = [d for d in docs if d.metadata["symbol_name"] == "index"][0]
         helper_fn = [d for d in docs if d.metadata["symbol_name"] == "helper"][0]
-
         assert "app.route" in index_fn.metadata["decorators"]
         assert "@app.route" in index_fn.page_content
         assert index_fn.metadata["start_line"] == 4
@@ -156,9 +149,10 @@ class TestDocstrings:
 
     def test_docstring_detection(self):
         docs = chunk_python_file(self.SOURCE, "funcs.py")
-        by_name = {d.metadata["symbol_name"]: d for d in docs}
-        assert by_name["documented"].metadata["has_docstring"] is True
-        assert by_name["undocumented"].metadata["has_docstring"] is False
+        doc_fn = [d for d in docs if d.metadata["symbol_name"] == "documented"][0]
+        undoc_fn = [d for d in docs if d.metadata["symbol_name"] == "undocumented"][0]
+        assert doc_fn.metadata["has_docstring"] is True
+        assert undoc_fn.metadata["has_docstring"] is False
 
 
 class TestNestedFunctions:
@@ -170,20 +164,19 @@ class TestNestedFunctions:
     """)
 
     def test_inner_stays_inside_outer(self):
-        docs = chunk_python_file(self.SOURCE, "nested.py")
-        funcs = [d for d in docs if d.metadata["chunk_type"] == "function"]
+        funcs = [d for d in chunk_python_file(self.SOURCE, "nested.py") if d.metadata["chunk_type"] == "function"]
         assert len(funcs) == 1
         assert funcs[0].metadata["symbol_name"] == "outer"
         assert "def inner" in funcs[0].page_content
 
 
-class TestEdgeCases:
+class TestEmptyAndSyntaxError:
     def test_empty_and_whitespace(self):
         assert chunk_python_file("", "empty.py") == []
         assert chunk_python_file("   \n\n  \n", "blank.py") == []
 
     def test_syntax_error_falls_back_to_block(self):
-        docs = chunk_python_file("def broken(\n    bad python\n", "broken.py")
+        docs = chunk_python_file("def broken(\n    not valid python\n    return 42\n", "broken.py")
         assert len(docs) > 0
         assert all(d.metadata["chunk_type"] == "block" for d in docs)
         assert all(d.metadata["language"] == "python" for d in docs)
@@ -201,9 +194,8 @@ class TestModuleLevelCode:
             print("running")
     """)
 
-    def test_module_chunk_contains_imports_and_constants_only(self):
-        docs = chunk_python_file(self.SOURCE, "settings.py")
-        mods = [d for d in docs if d.metadata["chunk_type"] == "module"]
+    def test_module_chunk_contains_top_level_code_only(self):
+        mods = [d for d in chunk_python_file(self.SOURCE, "settings.py") if d.metadata["chunk_type"] == "module"]
         assert len(mods) == 1
         assert "import os" in mods[0].page_content
         assert "BASE_DIR" in mods[0].page_content
@@ -212,46 +204,50 @@ class TestModuleLevelCode:
 
 class TestFallbackChunker:
     def test_small_and_empty_files(self):
+        docs = chunk_text_file("line1\nline2\nline3\n", "readme.md")
+        assert len(docs) == 1 and docs[0].metadata["chunk_type"] == "block"
+        assert chunk_text_file("hello", "index.js")[0].metadata["language"] == "javascript"
         assert chunk_text_file("", "empty.md") == []
-        docs = chunk_text_file("line1\nline2\n", "index.js")
-        assert len(docs) == 1
-        assert docs[0].metadata["chunk_type"] == "block"
-        assert docs[0].metadata["language"] == "javascript"
 
-    def test_overlap_and_line_numbers(self):
+    def test_large_file_line_numbers_and_overlap(self):
         source = "".join(f"LINE_{i}\n" for i in range(1, 101))
         docs = chunk_text_file(source, "data.txt", chunk_size=50, overlap=10)
-        assert len(docs) > 1
+        assert len(docs) == 3
         assert (docs[0].metadata["start_line"], docs[0].metadata["end_line"]) == (1, 50)
         assert (docs[1].metadata["start_line"], docs[1].metadata["end_line"]) == (41, 90)
         assert docs[0].page_content.splitlines()[-10:] == docs[1].page_content.splitlines()[:10]
 
 
 class TestGuessLanguage:
-    @pytest.mark.parametrize("fname,expected", [
+    @pytest.mark.parametrize("path,expected", [
         ("app.py", "python"),
         ("index.js", "javascript"),
         ("app.ts", "typescript"),
         ("README.md", "markdown"),
         ("data.xyz", "text"),
     ])
-    def test_language_lookup(self, fname, expected):
-        assert _guess_language(fname) == expected
+    def test_guess_language(self, path, expected):
+        assert _guess_language(path) == expected
 
 
 class TestChunkFileRouter:
-    def _make_file(self, tmp_path: Path, name: str, content: str) -> dict:
-        fpath = tmp_path / name
+    @pytest.fixture(autouse=True)
+    def setup_tmpdir(self, tmp_path: Path):
+        self.tmp = tmp_path
+
+    def _make_file(self, name: str, content: str) -> dict:
+        fpath = self.tmp / name
         fpath.write_text(content, encoding="utf-8")
         return {"path": fpath, "relative_path": name, "extension": fpath.suffix.lower()}
 
-    def test_routes_python_vs_fallback_and_empty(self, tmp_path: Path):
-        py_docs = chunk_file(self._make_file(tmp_path, "app.py", "def hello():\n    pass\n"))
-        js_docs = chunk_file(self._make_file(tmp_path, "app.js", "function hello() { return 1; }\n"))
-        md_docs = chunk_file(self._make_file(tmp_path, "README.md", "# Hello\n"))
-        empty_docs = chunk_file(self._make_file(tmp_path, "empty.py", ""))
-
+    def test_routes_python_js_md_and_empty(self):
+        py_docs = chunk_file(self._make_file("app.py", "def hello():\n    pass\n"))
         assert "function" in {d.metadata["chunk_type"] for d in py_docs}
+
+        js_docs = chunk_file(self._make_file("app.js", "function hello() {\n  return 1;\n}\n"))
         assert all(d.metadata["chunk_type"] == "block" for d in js_docs)
+
+        md_docs = chunk_file(self._make_file("README.md", "# Hello\n\nSome text.\n"))
         assert md_docs[0].metadata["language"] == "markdown"
-        assert empty_docs == []
+
+        assert chunk_file(self._make_file("empty.py", "")) == []

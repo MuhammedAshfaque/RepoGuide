@@ -1,8 +1,7 @@
-"""Code-aware chunker: Python AST chunking with 50-line overlapping fallback -> LangChain Documents."""
+"""Code-aware chunker: Python AST chunking + 50-line overlapping fallback, outputting LangChain Documents."""
 
 import ast
 from pathlib import Path
-
 from langchain_core.documents import Document
 
 DEFAULT_CHUNK_SIZE = 50
@@ -31,7 +30,7 @@ def _make_doc(
     decorators: list[str] | None = None,
     has_docstring: bool = False,
 ) -> Document:
-    """Create a LangChain Document with scalar Chroma-safe code metadata."""
+    """Create a LangChain Document with Chroma-safe scalar metadata."""
     return Document(
         page_content=content,
         metadata={
@@ -42,19 +41,20 @@ def _make_doc(
             "chunk_type": chunk_type,
             "language": language,
             "parent_class": parent_class,
-            "decorators": ", ".join(decorators) if decorators else "",
+            "decorators": ", ".join(decorators or []),
             "has_docstring": has_docstring,
         },
     )
 
 
-def _get_source_lines(lines: list[str], start: int, end: int) -> str:
-    """Slice 1-based inclusive line range from pre-split source lines."""
+def _get_source_lines(source: str, start: int, end: int) -> str:
+    """Extract 1-based inclusive line range [start, end] from source."""
+    lines = source.splitlines(keepends=True)
     return "".join(lines[max(1, start) - 1 : min(len(lines), end)])
 
 
 def _decorator_names(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> list[str]:
-    """Extract readable decorator names (e.g. 'app.route', 'staticmethod')."""
+    """Return human-readable decorator names (e.g. 'app.route', 'staticmethod')."""
     names: list[str] = []
     for dec in node.decorator_list:
         target = dec.func if isinstance(dec, ast.Call) else dec
@@ -64,7 +64,7 @@ def _decorator_names(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 
 
 def _has_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> bool:
-    """Return True if the first body statement is a string literal docstring."""
+    """Return True if the first statement in a function or class body is a docstring."""
     return bool(
         node.body
         and isinstance(node.body[0], ast.Expr)
@@ -72,57 +72,71 @@ def _has_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) 
     )
 
 
-def _start_line(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> int:
-    """Return the node's first line including any decorators."""
+def _effective_start_line(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> int:
+    """Return the first line of a node including any leading decorators."""
     return node.decorator_list[0].lineno if node.decorator_list else node.lineno
 
 
-def _chunk_class(node: ast.ClassDef, lines: list[str], file_path: str) -> list[Document]:
-    """Extract method chunks plus either a class signature chunk or the whole class."""
+def _chunk_class(node: ast.ClassDef, source: str, file_path: str) -> list[Document]:
+    """Extract each method as a Document plus a class signature (or whole class if methodless)."""
     docs: list[Document] = []
-    class_start = _start_line(node)
+    class_start = _effective_start_line(node)
     class_end = node.end_lineno or node.lineno
-    methods = [n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
-    for method in methods:
-        m_start = _start_line(method)
-        m_end = method.end_lineno or method.lineno
-        is_async = isinstance(method, ast.AsyncFunctionDef)
+    methods = [item for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for item in methods:
+        m_start = _effective_start_line(item)
+        m_end = item.end_lineno or item.lineno
+        is_async = isinstance(item, ast.AsyncFunctionDef)
         docs.append(_make_doc(
-            content=_get_source_lines(lines, m_start, m_end),
+            content=_get_source_lines(source, m_start, m_end),
             file_path=file_path,
             start_line=m_start,
             end_line=m_end,
-            symbol_name=method.name,
+            symbol_name=item.name,
             chunk_type="async_method" if is_async else "method",
             language="python",
             parent_class=node.name,
-            decorators=_decorator_names(method),
-            has_docstring=_has_docstring(method),
+            decorators=_decorator_names(item),
+            has_docstring=_has_docstring(item),
         ))
 
-    # Classes with methods emit a header/attributes chunk; methodless classes stay whole
-    sig_end = min(_start_line(m) for m in methods) - 1 if methods else class_end
-    if sig_end >= class_start:
+    if methods:
+        sig_end = min(_effective_start_line(m) for m in methods) - 1
+        if sig_end >= class_start:
+            docs.append(_make_doc(
+                content=_get_source_lines(source, class_start, sig_end),
+                file_path=file_path,
+                start_line=class_start,
+                end_line=sig_end,
+                symbol_name=node.name,
+                chunk_type="class",
+                language="python",
+                decorators=_decorator_names(node),
+                has_docstring=_has_docstring(node),
+            ))
+    else:
         docs.append(_make_doc(
-            content=_get_source_lines(lines, class_start, sig_end),
+            content=_get_source_lines(source, class_start, class_end),
             file_path=file_path,
             start_line=class_start,
-            end_line=sig_end,
+            end_line=class_end,
             symbol_name=node.name,
             chunk_type="class",
             language="python",
             decorators=_decorator_names(node),
             has_docstring=_has_docstring(node),
         ))
+
     return docs
 
 
-def _chunk_module(lines: list[str], covered: list[tuple[int, int]], file_path: str) -> Document | None:
-    """Collect top-level lines (imports, constants) outside any function or class."""
-    mod_lines, mod_nums = [], []
-    for i, line in enumerate(lines, 1):
-        if not any(s <= i <= e for s, e in covered):
+def _chunk_module(source_lines: list[str], covered: list[tuple[int, int]], file_path: str) -> Document | None:
+    """Collect top-level lines outside functions/classes (imports, constants) into a module Document."""
+    mod_lines: list[str] = []
+    mod_nums: list[int] = []
+    for i, line in enumerate(source_lines, 1):
+        if not any(start <= i <= end for start, end in covered):
             mod_lines.append(line)
             mod_nums.append(i)
 
@@ -141,22 +155,22 @@ def _chunk_module(lines: list[str], covered: list[tuple[int, int]], file_path: s
 
 
 def chunk_python_file(source: str, file_path: str) -> list[Document]:
-    """Parse Python code via AST into function, class, method, and module Documents."""
+    """Parse Python source via AST into function/class/method/module Documents (fallback on SyntaxError)."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return chunk_text_file(source, file_path, language="python")
 
-    lines = source.splitlines(keepends=True)
     docs: list[Document] = []
     covered: list[tuple[int, int]] = []
 
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            start, end = _start_line(node), node.end_lineno or node.lineno
+            start = _effective_start_line(node)
+            end = node.end_lineno or node.lineno
             is_async = isinstance(node, ast.AsyncFunctionDef)
             docs.append(_make_doc(
-                content=_get_source_lines(lines, start, end),
+                content=_get_source_lines(source, start, end),
                 file_path=file_path,
                 start_line=start,
                 end_line=end,
@@ -168,11 +182,12 @@ def chunk_python_file(source: str, file_path: str) -> list[Document]:
             ))
             covered.append((start, end))
         elif isinstance(node, ast.ClassDef):
-            docs.extend(_chunk_class(node, lines, file_path))
-            covered.append((_start_line(node), node.end_lineno or node.lineno))
+            docs.extend(_chunk_class(node, source, file_path))
+            covered.append((_effective_start_line(node), node.end_lineno or node.lineno))
 
-    if lines:
-        mod_doc = _chunk_module(lines, covered, file_path)
+    source_lines = source.splitlines(keepends=True)
+    if source_lines:
+        mod_doc = _chunk_module(source_lines, covered, file_path)
         if mod_doc:
             docs.append(mod_doc)
 
@@ -180,7 +195,7 @@ def chunk_python_file(source: str, file_path: str) -> list[Document]:
 
 
 def _guess_language(file_path: str) -> str:
-    """Infer a syntax language label from the file extension."""
+    """Infer a language label from a file extension."""
     return _EXTENSION_TO_LANGUAGE.get(Path(file_path).suffix.lower(), "text")
 
 
@@ -191,7 +206,7 @@ def chunk_text_file(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap: int = DEFAULT_OVERLAP,
 ) -> list[Document]:
-    """Split non-Python (or unparseable) files into overlapping fixed-line Documents."""
+    """Split a non-Python text file into overlapping fixed-line Document blocks."""
     lines = source.splitlines(keepends=True)
     total = len(lines)
     if total == 0:
@@ -210,11 +225,12 @@ def chunk_text_file(
             docs.append(_make_doc(content, file_path, start_idx + 1, end_idx, "", "block", lang))
         if end_idx >= total:
             break
+
     return docs
 
 
 def chunk_file(file_info: dict) -> list[Document]:
-    """Read a file dict from load_files() and route to AST or fallback chunking."""
+    """Read a file dict from loader.load_files() and chunk it via AST (.py) or line fallback."""
     try:
         source = file_info["path"].read_text(encoding="utf-8", errors="replace")
     except (OSError, UnicodeDecodeError):
