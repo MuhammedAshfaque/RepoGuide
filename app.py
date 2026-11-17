@@ -21,7 +21,7 @@ from src.generation.chain import (
     stream_answer,
     verify_all_citations,
 )
-from src.ingestion.indexer import get_docs_path, index_repo, strip_metadata_header
+from src.ingestion.indexer import get_meta_path, index_repo, strip_metadata_header
 from src.ingestion.loader import repo_name_from_url
 from src.retrieval.retrieval import clear_retriever_cache, get_retriever
 
@@ -45,8 +45,8 @@ def resolve_repo_name(source: str) -> str:
 
 
 def check_repo_indexed(repo_name: str) -> bool:
-    """Fast check for whether serialized Documents exist for this repo."""
-    return get_docs_path(repo_name).exists()
+    """Fast check for whether index metadata exists for this repo."""
+    return get_meta_path(repo_name).exists()
 
 
 def retrieve_by_mode(

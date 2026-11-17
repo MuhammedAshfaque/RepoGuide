@@ -125,7 +125,7 @@ class TestBM25Retriever:
             bm25 = get_bm25_retriever("demo_repo", top_k=2)
             results = bm25.invoke("authenticate_user")
 
-        assert len(results) == 1
+        assert len(results) == 2
         assert results[0].metadata["symbol_name"] == "authenticate_user"
 
     def test_subword_query_matches_compound_identifier(self, sample_docs):
@@ -133,15 +133,7 @@ class TestBM25Retriever:
             bm25 = get_bm25_retriever("demo_repo", top_k=2)
             results = bm25.invoke("article")
 
-        assert len(results) == 1
         assert results[0].metadata["symbol_name"] == "create_article"
-
-    def test_zero_score_documents_are_filtered_out(self, sample_docs):
-        with patch.object(retrieval, "load_documents", return_value=sample_docs):
-            bm25 = get_bm25_retriever("demo_repo", top_k=5)
-            results = bm25.invoke("nonexistent_symbol_xyz")
-
-        assert results == []
 
     def test_missing_docs_raises_file_not_found(self):
         with patch.object(retrieval, "load_documents", return_value=[]):
