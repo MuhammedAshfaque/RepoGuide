@@ -9,7 +9,6 @@ import git
 
 from src.config import (
     ALLOWED_EXTENSIONS,
-    BINARY_EXTENSIONS,
     DATA_DIR,
     MAX_FILE_SIZE_KB,
     SKIP_DIRS,
@@ -54,12 +53,12 @@ def _should_skip_dir(dir_name: str) -> bool:
 
 
 def _should_include_file(file_path: Path) -> bool:
-    """Return True if a file passes name, binary, allowlist, and size filters."""
+    """Return True if a file passes name, allowlist, and size filters."""
     if file_path.name in SKIP_FILES:
         return False
     ext = file_path.suffix.lower()
-    if ext in BINARY_EXTENSIONS:
-        return False
+    # Files with an extension not on the allowlist are skipped (covers binaries too).
+    # Files with no extension (Makefile, Dockerfile, etc.) are allowed through.
     if ext and ext not in ALLOWED_EXTENSIONS:
         return False
     try:

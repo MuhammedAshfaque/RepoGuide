@@ -44,7 +44,7 @@ def render_citations_and_snippets(docs: list[Document], valid: list[str], halluc
     if not docs:
         return
 
-    with st.expander(f"📄 View Retrieved Code Snippets ({len(docs)})", expanded=False):
+    with st.expander(f"View Retrieved Code Snippets ({len(docs)})", expanded=False):
         for idx, doc in enumerate(docs, 1):
             m = doc.metadata
             sym = m.get("symbol_name") or "(block)"
@@ -56,23 +56,23 @@ def render_citations_and_snippets(docs: list[Document], valid: list[str], halluc
 
 # ── Page Setup & State ───────────────────────────────────────────────────────
 
-st.set_page_config(page_title="CodeCompass — Codebase Assistant", page_icon="🧭", layout="wide")
+st.set_page_config(page_title="CodeCompass — Codebase Assistant", page_icon="", layout="wide")
 st.session_state.setdefault("messages", [])
 st.session_state.setdefault("is_indexing", False)
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("🧭 CodeCompass")
+    st.title("CodeCompass")
     st.caption("Codebase Onboarding Assistant (LangChain RAG)")
     st.divider()
 
-    st.subheader("🤖 LLM Backend")
+    st.subheader("LLM Backend")
     provider_label = st.selectbox("Provider:", ["Ollama (Local)", "Gemini (Cloud API)"], index=0)
     chosen_provider = "gemini" if "Gemini" in provider_label else "ollama"
     active_model = GEMINI_MODEL if chosen_provider == "gemini" else LLM_MODEL
 
-    is_healthy, health_msg = check_llm_health(provider=chosen_provider)
+    is_healthy, health_msg = check_llm_health(provider=chosen_provider, model=active_model)
     if is_healthy:
         st.success(f"**Connected**: `{active_model}`")
     else:
@@ -80,15 +80,15 @@ with st.sidebar:
         st.info(health_msg)
 
     st.divider()
-    st.subheader("📦 Repository")
-    repo_input = st.text_input("GitHub URL or Local Path:", value="data/flask-realworld-example-app")
+    st.subheader("Repository")
+    repo_input = st.text_input("GitHub URL or Local Path:", value="Paste you github repository link")
     current_repo = resolve_repo_name(repo_input)
     is_indexed = check_repo_indexed(current_repo)
-    st.caption(f"Status: {'✅ **Indexed**' if is_indexed else '⚠️ **Not indexed yet**'} (`{current_repo}`)")
+    st.caption(f"Status: {'**Indexed**' if is_indexed else '**Not indexed yet**'} (`{current_repo}`)")
 
     col1, col2 = st.columns([2, 1])
     force_reindex = col2.checkbox("Force", value=False)
-    if col1.button("⚡ Index Repo", use_container_width=True, disabled=st.session_state.is_indexing):
+    if col1.button(" Index Repo", use_container_width=True, disabled=st.session_state.is_indexing):
         st.session_state.is_indexing = True
         with st.spinner(f"Indexing '{current_repo}'..."):
             try:
@@ -108,13 +108,13 @@ with st.sidebar:
                 st.error(f"Indexing error: {exc}")
 
     st.divider()
-    with st.expander("⚙️ Additional Settings", expanded=False):
-        st.markdown("**🔍 Retrieval Settings**")
+    with st.expander("Additional Settings", expanded=False):
+        st.markdown("Retrieval Settings")
         search_mode = st.radio("Search Engine Mode:", list(MODE_MAP.keys()), index=0)
         top_k_chunks = st.slider("Chunks fed to LLM:", min_value=1, max_value=TOP_K_FINAL, value=TOP_K_FINAL)
 
     st.divider()
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
+    if st.button("Clear Chat History", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
@@ -125,7 +125,7 @@ st.markdown("Explore architecture, locate functions, and trace request flows wit
 
 if not st.session_state.messages:
     st.info(
-        "💡 **Try asking:**\n"
+        " **Try asking:**\n"
         "- *'Where is user authentication handled?'*\n"
         "- *'How does an article get created and saved to the database?'*\n"
         "- *'Where is jwt_optional used and what does it do?'*\n"
@@ -145,7 +145,7 @@ for msg in st.session_state.messages:
 user_query = st.chat_input("Ask a question about this repository...", disabled=st.session_state.is_indexing)
 if user_query:
     if not is_indexed:
-        st.warning(f"Please click **⚡ Index Repo** to index `{current_repo}` first.")
+        st.warning(f"Please click ** Index Repo** to index `{current_repo}` first.")
     elif not is_healthy:
         st.error(f"Cannot generate answer: {health_msg}")
     else:
@@ -155,7 +155,7 @@ if user_query:
 
         with st.chat_message("assistant"):
             retriever = get_retriever(current_repo, mode=MODE_MAP[search_mode], top_k=top_k_chunks)
-            llm = get_chat_model(provider=chosen_provider)
+            llm = get_chat_model(provider=chosen_provider, model=active_model)
             try:
                 with st.spinner(f"Searching `{current_repo}` via {search_mode}..."):
                     token_stream, retrieved_docs = stream_answer(user_query, retriever, llm=llm)

@@ -5,7 +5,7 @@ Covers:
   - ChatPromptTemplate rules, few-shot examples, and escaping
   - format_docs() max-chunk cap and character truncation
   - get_chat_model() provider switching and error handling
-  - LCEL build_chain() invoke & stream with mock retriever and mock LLM
+  - stream_answer() streaming with mock retriever and mock LLM
   - stream_answer() refusal when no documents are retrieved
   - Citation extraction and post-generation verification against Documents
 """
@@ -20,7 +20,6 @@ from src.generation.chain import (
     ParsedCitation,
     REFUSAL_MESSAGE,
     SYSTEM_PROMPT,
-    build_chain,
     extract_citations,
     format_docs,
     get_chat_model,
@@ -119,21 +118,6 @@ class TestChatModelFactory:
 # ── 3. LCEL Chain & Streaming Tests ──────────────────────────────────────────
 
 class TestLCELChain:
-    def test_build_chain_invoke_and_verify(self):
-        docs = [_make_doc("conduit/user/views.py", 30, 40, "def login_user(): pass", "login_user")]
-        fake_retriever = RunnableLambda(lambda q: docs)
-        fake_llm = RunnableLambda(
-            lambda prompt_val: AIMessage(content="Handled at `conduit/user/views.py:30-40`.")
-        )
-
-        rag_chain = build_chain(fake_retriever, llm=fake_llm)
-        answer = rag_chain.invoke("Where is login handled?")
-
-        assert "conduit/user/views.py:30-40" in answer
-        valid, hallucinated = verify_all_citations(answer, docs)
-        assert valid == ["conduit/user/views.py:30-40"]
-        assert hallucinated == []
-
     def test_stream_answer_streams_and_returns_docs(self):
         docs = [_make_doc("conduit/user/views.py", 30, 40, "def login_user(): pass", "login_user")]
         fake_retriever = RunnableLambda(lambda q: docs)

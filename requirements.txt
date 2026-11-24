@@ -14,7 +14,7 @@ langchain-huggingface>=1.0.0
 langchain-ollama>=1.0.0
 langchain-google-genai>=4.0.0
 
-# Runtime backends required by LangChain embeddings, BM25 & cross-encoder
+# Runtime backends required by LangChain BM25 & cross-encoder
 sentence-transformers>=2.2.0
 rank_bm25>=0.2.2
 

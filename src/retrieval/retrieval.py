@@ -11,8 +11,8 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_core.runnables import Runnable, RunnableLambda
 
-from src.config import RERANKER_MODEL, TOP_K_FINAL, TOP_K_RETRIEVAL, get_collection_name
-from src.ingestion.indexer import get_vector_store, load_documents
+from src.config import RERANKER_MODEL, TOP_K_FINAL, TOP_K_RETRIEVAL
+from src.ingestion.indexer import get_collection_name, get_vector_store, load_documents
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +89,7 @@ def get_cross_encoder(model_name: str = RERANKER_MODEL) -> Optional[HuggingFaceC
         return _cross_encoder_cache[model_name]
 
     try:
-        try:
-            encoder = HuggingFaceCrossEncoder(model_name=model_name, model_kwargs={"local_files_only": True})
-        except Exception:
-            encoder = HuggingFaceCrossEncoder(model_name=model_name)
+        encoder = HuggingFaceCrossEncoder(model_name=model_name)
         _cross_encoder_cache[model_name] = encoder
         return encoder
     except Exception as exc:

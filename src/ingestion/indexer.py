@@ -11,7 +11,7 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 
-from src.config import DATA_DIR, EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL, get_collection_name
+from src.config import DATA_DIR, EMBEDDING_BATCH_SIZE, EMBEDDING_MODEL
 from src.ingestion.chunker import chunk_file
 from src.ingestion.loader import load_files, repo_name_from_url
 
@@ -21,21 +21,24 @@ CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 _embeddings: Optional[HuggingFaceEmbeddings] = None
 
 
+def get_collection_name(repo_name: str) -> str:
+    """Build a Chroma-safe collection name (3-63 chars, alphanumeric/-/_)."""
+    clean = "".join(c if c.isalnum() or c in "-_" else "-" for c in repo_name).strip("-_")
+    if len(clean) < 3:
+        clean += "-idx"
+    return clean[:63]
+
+
 def get_embeddings() -> HuggingFaceEmbeddings:
-    """Return the cached CPU HuggingFaceEmbeddings singleton (prefers local cache)."""
+    """Return the cached CPU HuggingFaceEmbeddings singleton."""
     global _embeddings
     if _embeddings is None:
-        for kwargs in ({"device": "cpu", "local_files_only": True}, {"device": "cpu"}):
-            try:
-                _embeddings = HuggingFaceEmbeddings(
-                    model_name=EMBEDDING_MODEL,
-                    model_kwargs=kwargs,
-                    encode_kwargs={"normalize_embeddings": True},
-                )
-                break
-            except Exception:
-                continue
-    return _embeddings  # type: ignore[return-value]
+        _embeddings = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+    return _embeddings
 
 
 def get_vector_store(repo_name: str) -> Chroma:
@@ -91,11 +94,6 @@ def load_documents(repo_name: str) -> list[Document]:
 def get_meta_path(repo_name: str) -> Path:
     """Return the path to the repo's fingerprint metadata JSON."""
     return DATA_DIR / f"{repo_name}_meta.json"
-
-
-def is_repo_indexed(repo_name: str) -> bool:
-    """Fast check for whether fingerprint metadata exists for this repo."""
-    return get_meta_path(repo_name).exists()
 
 
 def compute_repo_fingerprint(files: list[dict], repo_dir: Optional[Path] = None) -> str:

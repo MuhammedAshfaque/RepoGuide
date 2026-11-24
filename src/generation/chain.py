@@ -10,7 +10,7 @@ from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import Runnable, RunnableLambda, RunnablePassthrough
+from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 
 from src.config import (
@@ -148,11 +148,6 @@ def format_docs(docs: list[Document], max_chunks: int = TOP_K_FINAL, max_chunk_c
 def _answer_pipeline(llm: Optional[BaseChatModel] = None) -> Runnable[dict, str]:
     """Core LCEL generation runnable: {context, question} -> prompt -> LLM -> string."""
     return get_prompt_template() | (llm or get_chat_model()) | StrOutputParser()
-
-
-def build_chain(retriever: Runnable[str, list[Document]], llm: Optional[BaseChatModel] = None) -> Runnable[str, str]:
-    """Build the full LCEL RAG pipeline: retriever -> format_docs -> prompt -> LLM -> StrOutputParser."""
-    return {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()} | _answer_pipeline(llm)
 
 
 def stream_answer(

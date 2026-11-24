@@ -26,3 +26,8 @@ chroma_db/
 # BM25 index
 *.pkl
 
+# Local planning and documentation files
+PROGRESS.md
+plan.md
+DEMO_PLAN.md
+interview.md
