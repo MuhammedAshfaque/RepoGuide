@@ -1,12 +1,11 @@
-# CodeCompass dependencies (LangChain edition)
+# CodeCompass dependencies
 # Install: pip install -r requirements.txt
 
-# --- Core & Ingestion ---
+# Core & ingestion
 python-dotenv>=1.0.0
 gitpython>=3.1.0
 
-# --- LangChain RAG Pipeline ---
-langchain>=1.0.0
+# LangChain RAG pipeline
 langchain-core>=1.0.0
 langchain-community>=0.4.0
 langchain-classic>=1.0.0
@@ -15,16 +14,11 @@ langchain-huggingface>=1.0.0
 langchain-ollama>=1.0.0
 langchain-google-genai>=4.0.0
 
-# --- Embeddings, Vector Store, BM25 & Cross-Encoder ---
+# Runtime backends required by LangChain embeddings, BM25, cross-encoder & Ollama health check
 sentence-transformers>=2.2.0
-chromadb>=0.4.0
 rank_bm25>=0.2.2
-
-# --- Local LLM Client (for Ollama health checks) ---
 ollama>=0.1.0
 
-# --- Web UI ---
+# UI & testing
 streamlit>=1.28.0
-
-# --- Testing ---
 pytest>=7.0.0

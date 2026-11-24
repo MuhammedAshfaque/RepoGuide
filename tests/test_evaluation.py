@@ -6,7 +6,6 @@ Tests ground-truth matching (is_chunk_relevant), ranking metrics calculation
 """
 
 import pytest
-from pathlib import Path
 from evaluation.run_eval import (
     is_chunk_relevant,
     evaluate_query_results,
